@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import "./input-sources.css";
 import { ServiceWorkerRegister } from "@/components/ServiceWorkerRegister";
+import { FilePickerGuard } from "@/components/FilePickerGuard";
 
 export const metadata: Metadata = {
   title: "TeacherSheet",
@@ -22,6 +23,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
     <html lang="he" dir="rtl">
       <body>
         <ServiceWorkerRegister />
+        <FilePickerGuard />
         {children}
       </body>
     </html>
