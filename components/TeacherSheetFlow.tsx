@@ -1,9 +1,11 @@
 "use client";
 
-import { ChangeEvent, useMemo, useRef, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import type { RefObject } from "react";
 import type { AnalyzeResponse, ExerciseAnalysis, ExerciseType } from "@/lib/types";
 
 type Step = "source" | "preview" | "analyzing" | "decoded" | "draft";
+type SourceKind = "camera" | "image" | "pdf" | "word" | "text";
 
 const typeLabels: Record<ExerciseType, string> = {
   fill_in_the_blanks: "Fill in the blanks",
@@ -15,6 +17,48 @@ const typeLabels: Record<ExerciseType, string> = {
   reading_comprehension: "Reading comprehension",
   sentence_writing: "Sentence writing",
   custom: "Custom"
+};
+
+const sourceMeta: Record<Exclude<SourceKind, "text">, {
+  title: string;
+  subtitle: string;
+  badge: string;
+  icon: "camera" | "image" | "pdf" | "word";
+  firstStep: string;
+  hint: string;
+}> = {
+  camera: {
+    title: "צלם דף",
+    subtitle: "צילום ישיר מהמצלמה",
+    badge: "CAMERA",
+    icon: "camera",
+    firstStep: "Google Document AI יקרא את הצילום והפריסה",
+    hint: "מומלץ לצלם את כל הדף, ישר ובתאורה טובה"
+  },
+  image: {
+    title: "תמונה",
+    subtitle: "JPG · PNG · WEBP · TIFF",
+    badge: "IMAGE",
+    icon: "image",
+    firstStep: "Google Document AI יקרא את התמונה והפריסה",
+    hint: "מתאים לצילום שכבר קיים בגלריה או במחשב"
+  },
+  pdf: {
+    title: "PDF",
+    subtitle: "דף יחיד או מסמך PDF",
+    badge: "PDF",
+    icon: "pdf",
+    firstStep: "Google Document AI יקרא את הטקסט והפריסה ב-PDF",
+    hint: "מתאים לדפי עבודה סרוקים או PDF מקורי"
+  },
+  word: {
+    title: "Word",
+    subtitle: "DOCX",
+    badge: "WORD",
+    icon: "word",
+    firstStep: "TeacherSheet יחלץ את הטקסט מקובץ ה-DOCX",
+    hint: "Word עובר חילוץ טקסט ישיר ואינו דורש OCR"
+  }
 };
 
 const initialAnalysis: ExerciseAnalysis = {
@@ -32,6 +76,19 @@ const initialAnalysis: ExerciseAnalysis = {
 function FileIcon({ kind }: { kind: "camera" | "image" | "pdf" | "word" }) {
   const map = { camera: "◉", image: "▧", pdf: "PDF", word: "W" } as const;
   return <span className={`source-icon source-icon-${kind}`}>{map[kind]}</span>;
+}
+
+function SourceCard({ kind, onClick }: { kind: Exclude<SourceKind, "text">; onClick: () => void }) {
+  const meta = sourceMeta[kind];
+  return (
+    <button className={`source-card source-card-${kind}`} onClick={onClick} type="button">
+      <span className="source-badge">{meta.badge}</span>
+      <FileIcon kind={meta.icon} />
+      <b>{meta.title}</b>
+      <small>{meta.subtitle}</small>
+      <span className="source-engine">{kind === "word" ? "DOCX → ChatGPT" : "Google AI → ChatGPT"}</span>
+    </button>
+  );
 }
 
 function QuestionSkeleton({ analysis }: { analysis: ExerciseAnalysis }) {
@@ -68,6 +125,7 @@ function QuestionSkeleton({ analysis }: { analysis: ExerciseAnalysis }) {
 
 export function TeacherSheetFlow() {
   const [step, setStep] = useState<Step>("source");
+  const [sourceKind, setSourceKind] = useState<SourceKind | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [text, setText] = useState("");
   const [ocrText, setOcrText] = useState("");
@@ -81,15 +139,20 @@ export function TeacherSheetFlow() {
   const wordRef = useRef<HTMLInputElement>(null);
 
   const previewUrl = useMemo(() => file?.type.startsWith("image/") ? URL.createObjectURL(file) : "", [file]);
+  useEffect(() => () => { if (previewUrl) URL.revokeObjectURL(previewUrl); }, [previewUrl]);
 
-  function choose(ref: React.RefObject<HTMLInputElement | null>) { ref.current?.click(); }
+  function choose(ref: RefObject<HTMLInputElement | null>) { ref.current?.click(); }
 
-  function handleFile(event: ChangeEvent<HTMLInputElement>) {
-    const picked = event.target.files?.[0];
-    if (!picked) return;
-    setFile(picked);
-    setError("");
-    setStep("preview");
+  function handleFile(kind: Exclude<SourceKind, "text">) {
+    return (event: ChangeEvent<HTMLInputElement>) => {
+      const picked = event.target.files?.[0];
+      if (!picked) return;
+      setSourceKind(kind);
+      setFile(picked);
+      setText("");
+      setError("");
+      setStep("preview");
+    };
   }
 
   async function runAnalysis() {
@@ -116,11 +179,26 @@ export function TeacherSheetFlow() {
     }
   }
 
+  function analyzeText() {
+    if (!text.trim()) return;
+    setSourceKind("text");
+    setFile(null);
+    void runAnalysis();
+  }
+
   function reset() {
-    setStep("source"); setFile(null); setText(""); setOcrText(""); setAnalysis(initialAnalysis); setWarning(""); setError("");
+    setStep("source");
+    setSourceKind(null);
+    setFile(null);
+    setText("");
+    setOcrText("");
+    setAnalysis(initialAnalysis);
+    setWarning("");
+    setError("");
   }
 
   const update = <K extends keyof ExerciseAnalysis>(key: K, value: ExerciseAnalysis[K]) => setAnalysis((a) => ({ ...a, [key]: value }));
+  const selectedMeta = sourceKind && sourceKind !== "text" ? sourceMeta[sourceKind] : null;
 
   return (
     <main className="app-shell">
@@ -140,37 +218,59 @@ export function TeacherSheetFlow() {
 
       {step === "source" && (
         <section className="screen-card hero-screen">
-          <div className="eyebrow">CREATE FROM AN EXAMPLE</div>
-          <h1>הצג למערכת את סוג התרגיל</h1>
-          <p>צלם דף תרגול או העלה קובץ. בשלב הזה המערכת מפענחת רק את מבנה התרגיל — ללא אוצר מילים, בדיקות או דף סופי.</p>
-          <div className="source-grid">
-            <button onClick={() => choose(cameraRef)}><FileIcon kind="camera" /><b>צלם דף</b><small>מצלמת הטלפון</small></button>
-            <button onClick={() => choose(imageRef)}><FileIcon kind="image" /><b>תמונה</b><small>JPG / PNG / WEBP</small></button>
-            <button onClick={() => choose(pdfRef)}><FileIcon kind="pdf" /><b>PDF</b><small>דף או מסמך</small></button>
-            <button onClick={() => choose(wordRef)}><FileIcon kind="word" /><b>Word</b><small>DOCX</small></button>
+          <div className="eyebrow">CHOOSE INPUT SOURCE</div>
+          <h1>איך תרצה להציג את דף התרגול?</h1>
+          <p>בחר את מקור הדוגמה. כל ארבעת המסלולים מגיעים לאותו מנגנון פענוח מבנה, אבל כל פורמט נקרא בדרך המתאימה לו.</p>
+
+          <div className="input-route-note">
+            <strong>4 מסלולי קלט מלאים</strong>
+            <span>מצלמה · תמונה · PDF · Word</span>
           </div>
-          <input ref={cameraRef} hidden type="file" accept="image/*" capture="environment" onChange={handleFile} />
-          <input ref={imageRef} hidden type="file" accept="image/jpeg,image/png,image/webp,image/tiff" onChange={handleFile} />
-          <input ref={pdfRef} hidden type="file" accept="application/pdf" onChange={handleFile} />
-          <input ref={wordRef} hidden type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={handleFile} />
-          <div className="or"><span>או לצורכי בדיקה</span></div>
-          <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="הדבק כאן טקסט של תרגיל לבדיקת מנגנון הפענוח..." />
+
+          <div className="source-grid source-grid-explicit">
+            <SourceCard kind="camera" onClick={() => choose(cameraRef)} />
+            <SourceCard kind="image" onClick={() => choose(imageRef)} />
+            <SourceCard kind="pdf" onClick={() => choose(pdfRef)} />
+            <SourceCard kind="word" onClick={() => choose(wordRef)} />
+          </div>
+
+          <input ref={cameraRef} hidden type="file" accept="image/*" capture="environment" onChange={handleFile("camera")} />
+          <input ref={imageRef} hidden type="file" accept="image/jpeg,image/png,image/webp,image/tiff" onChange={handleFile("image")} />
+          <input ref={pdfRef} hidden type="file" accept="application/pdf" onChange={handleFile("pdf")} />
+          <input ref={wordRef} hidden type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={handleFile("word")} />
+
+          <div className="format-support-row">
+            <span>Camera</span><span>JPG</span><span>PNG</span><span>WEBP</span><span>TIFF</span><span>PDF</span><span>DOCX</span>
+          </div>
+
+          <div className="or"><span>או הדבק טקסט לצורכי בדיקת הפענוח</span></div>
+          <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="הדבק כאן טקסט של תרגיל..." />
           {error && <div className="error-box">{error}</div>}
-          <button className="primary" disabled={!text.trim()} onClick={runAnalysis}>פענח טקסט</button>
+          <button className="primary" disabled={!text.trim()} onClick={analyzeText}>פענח טקסט</button>
         </section>
       )}
 
-      {step === "preview" && file && (
+      {step === "preview" && file && selectedMeta && (
         <section className="screen-card">
           <button className="back" onClick={() => setStep("source")}>→ חזרה</button>
-          <div className="screen-heading"><div><div className="eyebrow">SOURCE PREVIEW</div><h1>הדוגמה נקלטה</h1></div><span className="status-dot">מוכן לפענוח</span></div>
+          <div className="screen-heading">
+            <div><div className="eyebrow">SOURCE PREVIEW · {selectedMeta.badge}</div><h1>{selectedMeta.title} נקלט</h1></div>
+            <span className="status-dot">מוכן לפענוח</span>
+          </div>
           <div className="preview-layout">
             <div className="file-preview">
-              {previewUrl ? <img src={previewUrl} alt="תצוגת דף התרגול" /> : <div className="document-placeholder"><strong>{file.name.toLowerCase().endsWith(".pdf") ? "PDF" : "DOCX"}</strong><span>{file.name}</span></div>}
+              {previewUrl ? <img src={previewUrl} alt="תצוגת דף התרגול" /> : <div className="document-placeholder"><strong>{selectedMeta.badge}</strong><span>{file.name}</span></div>}
             </div>
             <div className="file-details">
+              <span className="preview-source-kind"><FileIcon kind={selectedMeta.icon} /><span><small>סוג קלט</small><b>{selectedMeta.title}</b></span></span>
               <label>קובץ</label><strong>{file.name}</strong><small>{(file.size / 1024 / 1024).toFixed(2)} MB</small>
-              <div className="pipeline-box"><b>מה יקרה עכשיו?</b><span>1. Google Document AI יקרא את הדף</span><span>2. ChatGPT יזהה את מבנה התרגיל</span><span>3. תוכל לתקן את הפענוח לפני יצירת הטיוטה</span></div>
+              <div className="source-hint">{selectedMeta.hint}</div>
+              <div className="pipeline-box">
+                <b>מסלול הפענוח</b>
+                <span>1. {selectedMeta.firstStep}</span>
+                <span>2. ChatGPT יזהה את סוג ומבנה התרגיל</span>
+                <span>3. יוצג פענוח לעריכה לפני יצירת טיוטה</span>
+              </div>
             </div>
           </div>
           {error && <div className="error-box">{error}</div>}
@@ -182,8 +282,8 @@ export function TeacherSheetFlow() {
         <section className="screen-card analyzing">
           <div className="scan-sheet"><div className="scan-line" /></div>
           <h1>מפענח את דף התרגול</h1>
-          <p>קורא טקסט, מיקום ופריסה — ואז מזהה את סוג התרגיל והמבנה שלו.</p>
-          <div className="analysis-steps"><span className="done">✓ קריאת מקור</span><span className="working">● ניתוח מבנה</span><span>○ יצירת מודל תרגיל</span></div>
+          <p>{sourceKind === "word" ? "מחלץ את תוכן מסמך ה-Word ומזהה את מבנה התרגיל." : sourceKind === "text" ? "מנתח את טקסט התרגיל ומזהה את המבנה שלו." : "קורא טקסט, מיקום ופריסה — ואז מזהה את סוג התרגיל והמבנה שלו."}</p>
+          <div className="analysis-steps"><span className="done">✓ קליטת מקור</span><span className="working">● ניתוח מבנה</span><span>○ יצירת מודל תרגיל</span></div>
         </section>
       )}
 
@@ -191,7 +291,7 @@ export function TeacherSheetFlow() {
         <section className="screen-card">
           <div className="screen-heading"><div><div className="eyebrow">STRUCTURE FOUND</div><h1>זה המבנה שמצאנו</h1></div><span className="confidence">{Math.round(analysis.confidence * 100)}% ביטחון</span></div>
           {warning && <div className="warning-box">{warning}</div>}
-          <div className="engine-note">Engine: <b>{engine}</b></div>
+          <div className="engine-note">Engine: <b>{engine}</b>{sourceKind && <span> · Input: <b>{sourceKind}</b></span>}</div>
           <div className="decoded-grid">
             <div className="form-panel">
               <label>סוג התרגיל<select value={analysis.exerciseType} onChange={(e) => update("exerciseType", e.target.value as ExerciseType)}>{Object.entries(typeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
