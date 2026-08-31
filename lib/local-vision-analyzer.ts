@@ -1,18 +1,15 @@
 "use client";
 
 import { fallbackAnalyze } from "./fallback-analyzer";
+import { detectRuntimeCapabilities, visionBackendPlan } from "./runtime-capabilities";
+import type { VisionBackend } from "./runtime-capabilities";
 import type { DocumentLayoutBlock, ExerciseAnalysis } from "./types";
 
 const MODEL_ID = "onnx-community/granite-docling-258M-ONNX";
 const LOC_SCALE = 500;
 
 type ProgressCallback = (message: string, progress?: number) => void;
-type VisionBackend = "webgpu" | "wasm";
 type DoclingEngine = { processor: any; model: any; RawImage: any; backend: VisionBackend };
-
-type BrowserGpu = {
-  requestAdapter: (options?: { powerPreference?: "low-power" | "high-performance" }) => Promise<unknown | null>;
-};
 
 let processorPromise: Promise<{ processor: any; RawImage: any }> | null = null;
 const modelPromises: Partial<Record<VisionBackend, Promise<any>>> = {};
@@ -89,26 +86,14 @@ async function loadProcessor(onProgress?: ProgressCallback) {
   return processorPromise;
 }
 
-async function hasUsableWebGPU() {
-  if (typeof navigator === "undefined") return false;
-  const gpu = (navigator as Navigator & { gpu?: BrowserGpu }).gpu;
-  if (!gpu?.requestAdapter) return false;
-  try {
-    const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
-    return Boolean(adapter);
-  } catch {
-    return false;
-  }
-}
-
 async function loadModel(backend: VisionBackend, onProgress?: ProgressCallback) {
   if (!modelPromises[backend]) {
     modelPromises[backend] = (async () => {
       const hf: any = await import("@huggingface/transformers");
       onProgress?.(
         backend === "webgpu"
-          ? "טוען Granite-Docling על המעבד הגרפי"
-          : "אין WebGPU זמין — טוען Granite-Docling על CPU/WASM",
+          ? "טוען Granite-Docling עם האצת GPU"
+          : "טוען Granite-Docling על WebAssembly/CPU",
         backend === "webgpu" ? 0.16 : 0.14
       );
       return hf.AutoModelForVision2Seq.from_pretrained(MODEL_ID, {
@@ -132,7 +117,7 @@ async function loadEngine(backend: VisionBackend, onProgress?: ProgressCallback)
 }
 
 export function localVisionSupported() {
-  return typeof window !== "undefined" && typeof navigator !== "undefined";
+  return typeof window !== "undefined" && typeof WebAssembly !== "undefined";
 }
 
 async function runDocling(input: {
@@ -143,8 +128,8 @@ async function runDocling(input: {
   const { processor, model, RawImage, backend } = await loadEngine(input.backend, input.onProgress);
   input.onProgress?.(
     backend === "webgpu"
-      ? "Granite-Docling קורא את התמונה באמצעות WebGPU"
-      : "Granite-Docling קורא את התמונה באמצעות CPU/WASM — זה עשוי לקחת יותר זמן",
+      ? "Granite-Docling קורא את התמונה עם GPU"
+      : "Granite-Docling קורא את התמונה עם WebAssembly/CPU — זה עשוי לקחת יותר זמן",
     0.34
   );
 
@@ -161,8 +146,6 @@ async function runDocling(input: {
 
   const prompt = processor.apply_chat_template(messages, { add_generation_prompt: true });
   const inputs = await processor(prompt, [image], {
-    // Image splitting improves accuracy but consumes much more memory. Keep it for GPU;
-    // on WASM/CPU favor reliability on phones and tablets.
     do_image_splitting: backend === "webgpu"
   });
 
@@ -189,24 +172,30 @@ export async function analyzeWithLocalVision(input: {
   ocrText?: string;
   onProgress?: ProgressCallback;
 }): Promise<{ analysis: ExerciseAnalysis; documentText: string; layout: DocumentLayoutBlock[]; backend: VisionBackend }> {
-  if (!localVisionSupported()) throw new Error("Local document vision is unavailable outside the browser.");
+  if (!localVisionSupported()) throw new Error("Local document vision requires WebAssembly in a browser context.");
 
-  input.onProgress?.("בודק אם קיים מאיץ WebGPU זמין", 0.04);
-  const webgpuAvailable = await hasUsableWebGPU();
-  let result: Awaited<ReturnType<typeof runDocling>>;
+  input.onProgress?.("בודק יכולות עיבוד זמינות במכשיר", 0.04);
+  const capabilities = await detectRuntimeCapabilities();
+  const plan = visionBackendPlan(capabilities);
+  if (!plan.length) throw new Error("No supported local AI runtime is available on this device.");
 
-  if (webgpuAvailable) {
+  let result: Awaited<ReturnType<typeof runDocling>> | null = null;
+  let lastError = "";
+
+  for (const backend of plan) {
     try {
-      result = await runDocling({ image: input.image, backend: "webgpu", onProgress: input.onProgress });
+      result = await runDocling({ image: input.image, backend, onProgress: input.onProgress });
+      break;
     } catch (error) {
-      const reason = error instanceof Error ? error.message : "WebGPU failed";
-      input.onProgress?.(`WebGPU נכשל (${reason}) — עובר אוטומטית ל-CPU/WASM`, 0.12);
-      result = await runDocling({ image: input.image, backend: "wasm", onProgress: input.onProgress });
+      lastError = error instanceof Error ? error.message : `${backend} failed`;
+      const next = plan[plan.indexOf(backend) + 1];
+      if (next) {
+        input.onProgress?.(`${backend.toUpperCase()} לא הצליח — עובר אוטומטית ל-${next.toUpperCase()}`, 0.12);
+      }
     }
-  } else {
-    input.onProgress?.("אין GPU adapter זמין בדפדפן — משתמש ב-CPU/WASM", 0.1);
-    result = await runDocling({ image: input.image, backend: "wasm", onProgress: input.onProgress });
   }
+
+  if (!result) throw new Error(lastError || "All local document-vision backends failed.");
 
   const { parsed, backend } = result;
   input.onProgress?.("מזהה את סוג התרגיל מתוך המסמך ששוחזר", 0.9);
