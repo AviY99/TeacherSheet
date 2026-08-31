@@ -7,9 +7,15 @@ const MODEL_ID = "onnx-community/granite-docling-258M-ONNX";
 const LOC_SCALE = 500;
 
 type ProgressCallback = (message: string, progress?: number) => void;
-type DoclingEngine = { processor: any; model: any; RawImage: any };
+type VisionBackend = "webgpu" | "wasm";
+type DoclingEngine = { processor: any; model: any; RawImage: any; backend: VisionBackend };
 
-let enginePromise: Promise<DoclingEngine> | null = null;
+type BrowserGpu = {
+  requestAdapter: (options?: { powerPreference?: "low-power" | "high-performance" }) => Promise<unknown | null>;
+};
+
+let processorPromise: Promise<{ processor: any; RawImage: any }> | null = null;
+const modelPromises: Partial<Record<VisionBackend, Promise<any>>> = {};
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -33,8 +39,6 @@ function parseDocTags(doctags: string) {
     const tag = match[1].toLowerCase();
     const text = cleanElementText(match[6]);
     if (!text) continue;
-
-    // Purely graphical regions do not help worksheet structure unless they contain readable text.
     if (["picture", "figure"].includes(tag)) continue;
 
     const left = Number(match[2]);
@@ -70,39 +74,79 @@ function parseDocTags(doctags: string) {
   };
 }
 
-async function loadEngine(onProgress?: ProgressCallback): Promise<DoclingEngine> {
-  if (!enginePromise) {
-    enginePromise = (async () => {
-      onProgress?.("טוען מנוע מסמכים חכם למכשיר — ההפעלה הראשונה עשויה לקחת זמן", 0.08);
+async function loadProcessor(onProgress?: ProgressCallback) {
+  if (!processorPromise) {
+    processorPromise = (async () => {
+      onProgress?.("טוען מעבד מסמכים מקומי", 0.08);
       const hf: any = await import("@huggingface/transformers");
       const processor = await hf.AutoProcessor.from_pretrained(MODEL_ID);
-      onProgress?.("טוען את מודל Granite-Docling המקומי", 0.18);
-      const model = await hf.AutoModelForVision2Seq.from_pretrained(MODEL_ID, {
-        device: "webgpu",
-        dtype: "q4"
-      });
-      return { processor, model, RawImage: hf.RawImage };
+      return { processor, RawImage: hf.RawImage };
     })().catch((error) => {
-      enginePromise = null;
+      processorPromise = null;
       throw error;
     });
   }
-  return enginePromise;
+  return processorPromise;
+}
+
+async function hasUsableWebGPU() {
+  if (typeof navigator === "undefined") return false;
+  const gpu = (navigator as Navigator & { gpu?: BrowserGpu }).gpu;
+  if (!gpu?.requestAdapter) return false;
+  try {
+    const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+    return Boolean(adapter);
+  } catch {
+    return false;
+  }
+}
+
+async function loadModel(backend: VisionBackend, onProgress?: ProgressCallback) {
+  if (!modelPromises[backend]) {
+    modelPromises[backend] = (async () => {
+      const hf: any = await import("@huggingface/transformers");
+      onProgress?.(
+        backend === "webgpu"
+          ? "טוען Granite-Docling על המעבד הגרפי"
+          : "אין WebGPU זמין — טוען Granite-Docling על CPU/WASM",
+        backend === "webgpu" ? 0.16 : 0.14
+      );
+      return hf.AutoModelForVision2Seq.from_pretrained(MODEL_ID, {
+        device: backend,
+        dtype: "q4"
+      });
+    })().catch((error) => {
+      delete modelPromises[backend];
+      throw error;
+    });
+  }
+  return modelPromises[backend]!;
+}
+
+async function loadEngine(backend: VisionBackend, onProgress?: ProgressCallback): Promise<DoclingEngine> {
+  const [{ processor, RawImage }, model] = await Promise.all([
+    loadProcessor(onProgress),
+    loadModel(backend, onProgress)
+  ]);
+  return { processor, model, RawImage, backend };
 }
 
 export function localVisionSupported() {
-  return typeof window !== "undefined" && typeof navigator !== "undefined" && "gpu" in navigator;
+  return typeof window !== "undefined" && typeof navigator !== "undefined";
 }
 
-export async function analyzeWithLocalVision(input: {
+async function runDocling(input: {
   image: File | Blob;
-  ocrText?: string;
+  backend: VisionBackend;
   onProgress?: ProgressCallback;
-}): Promise<{ analysis: ExerciseAnalysis; documentText: string; layout: DocumentLayoutBlock[] }> {
-  if (!localVisionSupported()) throw new Error("WebGPU is not available on this device/browser.");
-
-  const { processor, model, RawImage } = await loadEngine(input.onProgress);
-  input.onProgress?.("Granite-Docling קורא את התמונה ואת מבנה העמוד", 0.35);
+}) {
+  const { processor, model, RawImage, backend } = await loadEngine(input.backend, input.onProgress);
+  input.onProgress?.(
+    backend === "webgpu"
+      ? "Granite-Docling קורא את התמונה באמצעות WebGPU"
+      : "Granite-Docling קורא את התמונה באמצעות CPU/WASM — זה עשוי לקחת יותר זמן",
+    0.34
+  );
 
   const image = await RawImage.fromBlob(input.image);
   const messages = [
@@ -117,13 +161,15 @@ export async function analyzeWithLocalVision(input: {
 
   const prompt = processor.apply_chat_template(messages, { add_generation_prompt: true });
   const inputs = await processor(prompt, [image], {
-    do_image_splitting: true
+    // Image splitting improves accuracy but consumes much more memory. Keep it for GPU;
+    // on WASM/CPU favor reliability on phones and tablets.
+    do_image_splitting: backend === "webgpu"
   });
 
-  input.onProgress?.("הבינה המקומית משחזרת את כל רכיבי הדף", 0.55);
+  input.onProgress?.("הבינה המקומית משחזרת את רכיבי הדף", 0.55);
   const generatedIds = await model.generate({
     ...inputs,
-    max_new_tokens: 4096,
+    max_new_tokens: backend === "webgpu" ? 4096 : 3072,
     do_sample: false
   });
 
@@ -135,20 +181,50 @@ export async function analyzeWithLocalVision(input: {
   const rawDocTags = docStart >= 0 ? decoded.slice(docStart) : decoded;
   const parsed = parseDocTags(rawDocTags);
   if (parsed.text.length < 20) throw new Error("Granite-Docling returned too little readable document text.");
+  return { parsed, backend };
+}
 
+export async function analyzeWithLocalVision(input: {
+  image: File | Blob;
+  ocrText?: string;
+  onProgress?: ProgressCallback;
+}): Promise<{ analysis: ExerciseAnalysis; documentText: string; layout: DocumentLayoutBlock[]; backend: VisionBackend }> {
+  if (!localVisionSupported()) throw new Error("Local document vision is unavailable outside the browser.");
+
+  input.onProgress?.("בודק אם קיים מאיץ WebGPU זמין", 0.04);
+  const webgpuAvailable = await hasUsableWebGPU();
+  let result: Awaited<ReturnType<typeof runDocling>>;
+
+  if (webgpuAvailable) {
+    try {
+      result = await runDocling({ image: input.image, backend: "webgpu", onProgress: input.onProgress });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "WebGPU failed";
+      input.onProgress?.(`WebGPU נכשל (${reason}) — עובר אוטומטית ל-CPU/WASM`, 0.12);
+      result = await runDocling({ image: input.image, backend: "wasm", onProgress: input.onProgress });
+    }
+  } else {
+    input.onProgress?.("אין GPU adapter זמין בדפדפן — משתמש ב-CPU/WASM", 0.1);
+    result = await runDocling({ image: input.image, backend: "wasm", onProgress: input.onProgress });
+  }
+
+  const { parsed, backend } = result;
   input.onProgress?.("מזהה את סוג התרגיל מתוך המסמך ששוחזר", 0.9);
   const baseline = fallbackAnalyze(parsed.text, parsed.blocks);
-  const recoveredRows = Math.max(baseline.questions.length, parsed.blocks.filter((block) => /\d+[.)]|_{2,}|\.{4,}|\?$/.test(block.text)).length);
+  const recoveredRows = Math.max(
+    baseline.questions.length,
+    parsed.blocks.filter((block) => /\d+[.)]|_{2,}|\.{4,}|\?$/.test(block.text)).length
+  );
   const analysis: ExerciseAnalysis = {
     ...baseline,
     confidence: clamp(Math.max(baseline.confidence, recoveredRows >= 3 ? 0.76 : 0.68), 0, 0.88),
     layoutNotes: [
-      "Granite-Docling reconstructed the worksheet directly from the uploaded image.",
+      `Granite-Docling reconstructed the worksheet locally using ${backend.toUpperCase()}.`,
       `Document vision recovered ${parsed.blocks.length || parsed.text.split(/\n/).length} ordered page elements.`,
       ...baseline.layoutNotes
     ].slice(0, 8)
   };
 
   input.onProgress?.("מבנה הדף שוחזר", 1);
-  return { analysis, documentText: parsed.text, layout: parsed.blocks };
+  return { analysis, documentText: parsed.text, layout: parsed.blocks, backend };
 }
