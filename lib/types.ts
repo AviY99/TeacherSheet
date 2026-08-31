@@ -39,9 +39,16 @@ export interface DocumentLayoutBlock {
   height: number;
 }
 
+export type LocalAnalysisEngine =
+  | "browser-ocr+local"
+  | "pdf-text+local"
+  | "pdf-ocr+local"
+  | "docx+local"
+  | "text+local";
+
 export interface AnalyzeResponse {
   ocrText: string;
   analysis: ExerciseAnalysis;
-  engine: "google+openai" | "google+fallback" | "text+openai" | "text+fallback";
+  engine: LocalAnalysisEngine;
   warning?: string;
 }
