@@ -1,26 +1,39 @@
 # Architecture
 
 ```text
-Browser / PWA
+Browser / PWA / later APK
     |
-    | multipart source image / PDF / DOCX
+    +--> Camera / JPG / PNG / WEBP / TIFF
+    |       -> Tesseract.js (browser OCR)
+    |
+    +--> PDF
+    |       -> PDF.js text extraction
+    |       -> if scanned: render pages -> Tesseract.js OCR
+    |
+    +--> DOCX
+    |       -> Mammoth text extraction
+    |
+    +--> pasted text
+    |
     v
-Next.js server route /api/analyze
+Local deterministic structure analyzer
     |
-    +--> JPG/PNG/PDF --> Google Document AI OCR Processor
-    |                    | full text + normalized layout blocks
-    |                    v
-    +------------------> OpenAI Responses API
-                         | exercise structure JSON
-                         v
-Browser review screen --> structural worksheet draft
+    v
+Teacher review screen
+    |
+    v
+Structural worksheet draft
 ```
 
-## Why this arrangement
-- API credentials remain server-side.
-- Google is responsible for document reading and layout coordinates.
-- OpenAI is responsible for semantic classification and worksheet-structure reconstruction.
-- The browser receives only OCR text and the structured result.
+## Design constraints
+- No paid AI API.
+- No Google/OpenAI credentials.
+- No document is intentionally uploaded to an AI provider.
+- Current analysis runs in the user's browser/device.
+- Static export allows simple web hosting and later packaging into one APK.
+
+## Trade-off
+The local engine is cheaper and more private, but it cannot match a large multimodal cloud model on difficult layouts. Therefore TeacherSheet keeps an explicit review/edit screen after recognition. The local analyzer can be improved over time with more worksheet-specific rules and optional open-source on-device models without changing the no-paid-API requirement.
 
 ## APK later
-The web version is intentionally web-first. After deployment, Capacitor can create a single Android APK that loads the production TeacherSheet web application. The remote Google/OpenAI services do not require any extra installation on the teacher's device.
+Capacitor packages the static `out/` directory. The current OCR and structure-analysis flow can therefore run inside the Android package without requiring a TeacherSheet backend.
