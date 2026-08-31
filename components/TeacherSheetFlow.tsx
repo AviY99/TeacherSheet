@@ -42,7 +42,7 @@ const sourceMeta: Record<Exclude<SourceKind, "text">, {
     subtitle: "צילום ישיר מהמצלמה",
     badge: "CAMERA",
     icon: "camera",
-    firstStep: "Tesseract OCR יקרא את הצילום ישירות במכשיר",
+    firstStep: "OCR מקומי יקרא טקסט עזר, ואז מודל Vision מקומי יבחן את הדף עצמו",
     hint: "מומלץ לצלם את כל הדף, ישר ובתאורה טובה"
   },
   image: {
@@ -50,7 +50,7 @@ const sourceMeta: Record<Exclude<SourceKind, "text">, {
     subtitle: "JPG · PNG · WEBP · TIFF",
     badge: "IMAGE",
     icon: "image",
-    firstStep: "Tesseract OCR יקרא את התמונה ישירות במכשיר",
+    firstStep: "OCR מקומי יקרא טקסט עזר, ואז מודל Vision מקומי יבחן את התמונה עצמה",
     hint: "מתאים לצילום שכבר קיים בגלריה או במחשב"
   },
   pdf: {
@@ -90,19 +90,84 @@ function FileIcon({ kind }: { kind: "camera" | "image" | "pdf" | "word" }) {
 
 function SourceCard({ kind, onClick }: { kind: Exclude<SourceKind, "text">; onClick: () => void }) {
   const meta = sourceMeta[kind];
+  const engine = kind === "word"
+    ? "DOCX → ניתוח מקומי"
+    : kind === "pdf"
+      ? "PDF.js/OCR → ניתוח מקומי"
+      : "OCR עזר → Vision מקומי";
+
   return (
     <button className={`source-card source-card-${kind}`} onClick={onClick} type="button">
       <span className="source-badge">{meta.badge}</span>
       <FileIcon kind={meta.icon} />
       <b>{meta.title}</b>
       <small>{meta.subtitle}</small>
-      <span className="source-engine">{kind === "word" ? "DOCX → ניתוח מקומי" : kind === "pdf" ? "PDF.js/OCR → ניתוח מקומי" : "OCR מקומי → ניתוח מקומי"}</span>
+      <span className="source-engine">{engine}</span>
     </button>
   );
 }
 
+function StructuralQuestion({ analysis, index }: { analysis: ExerciseAnalysis; index: number }) {
+  const q = analysis.questions[index];
+  const number = q?.number || index + 1;
+  const text = q?.textPattern?.trim() || "Exercise item";
+
+  if (analysis.exerciseType === "multiple_choice") {
+    const optionCount = Math.max(2, Math.min(6, q?.optionCount || 3));
+    return (
+      <div className="paper-question-row paper-question-choice">
+        <div className="paper-number">{number}.</div>
+        <div className="paper-question-body">
+          <div className="paper-question-text">{text}</div>
+          <div className="choices">
+            {Array.from({ length: optionCount }).map((_, optionIndex) => (
+              <span key={optionIndex}>{String.fromCharCode(65 + optionIndex)}. option</span>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (analysis.exerciseType === "matching") {
+    return (
+      <div className="paper-question-row paper-question-matching">
+        <div className="paper-number">{number}.</div>
+        <div className="paper-question-body"><div className="paper-question-text">{text}</div></div>
+        <div className="matching-answer">Answer</div>
+      </div>
+    );
+  }
+
+  if (analysis.exerciseType === "true_false") {
+    return (
+      <div className="paper-question-row">
+        <div className="paper-number">{number}.</div>
+        <div className="paper-question-body">
+          <div className="paper-question-text">{text}</div>
+          <div className="tf-answer">True / False</div>
+        </div>
+      </div>
+    );
+  }
+
+  const blankCount = Math.max(1, Math.min(4, q?.blankCount || 1));
+  return (
+    <div className="paper-question-row">
+      <div className="paper-number">{number}.</div>
+      <div className="paper-question-body">
+        <div className="paper-question-text">{text}</div>
+        <div className="answer-lines" aria-hidden="true">
+          {Array.from({ length: blankCount }).map((_, blankIndex) => <span key={blankIndex} />)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function QuestionSkeleton({ analysis }: { analysis: ExerciseAnalysis }) {
-  const count = Math.min(analysis.questionCount, 10);
+  const count = Math.min(Math.max(analysis.questionCount, analysis.questions.length), 30);
+
   return (
     <div className="worksheet-paper">
       <div className="paper-meta"><span>Name: ____________</span><span>Date: ____________</span></div>
@@ -115,19 +180,9 @@ function QuestionSkeleton({ analysis }: { analysis: ExerciseAnalysis }) {
         </div>
       )}
       <div className="paper-questions">
-        {Array.from({ length: count }).map((_, i) => {
-          const q = analysis.questions[i];
-          if (analysis.exerciseType === "multiple_choice") {
-            return <div className="paper-question" key={i}><b>{i + 1}.</b> {q?.textPattern || "Question structure"}<div className="choices"><span>A. option</span><span>B. option</span><span>C. option</span></div></div>;
-          }
-          if (analysis.exerciseType === "matching") {
-            return <div className="match-row" key={i}><span>{i + 1}. Item</span><span>Answer</span></div>;
-          }
-          if (analysis.exerciseType === "true_false") {
-            return <div className="paper-question" key={i}><b>{i + 1}.</b> {q?.textPattern || "Statement"} <strong>True / False</strong></div>;
-          }
-          return <div className="paper-question" key={i}><b>{i + 1}.</b> {q?.textPattern || "Exercise item"} <span className="answer-line" /></div>;
-        })}
+        {Array.from({ length: count }).map((_, index) => (
+          <StructuralQuestion key={index} analysis={analysis} index={index} />
+        ))}
       </div>
     </div>
   );
@@ -209,6 +264,7 @@ export function TeacherSheetFlow() {
     setWarning("");
     setAnalysisProgress(0);
     setAnalysisStatus("מכין את מנוע הפענוח המקומי...");
+
     try {
       const result = await analyzeLocally({
         file: inputFile,
@@ -351,7 +407,7 @@ export function TeacherSheetFlow() {
     <main className="app-shell">
       <header className="topbar">
         <div className="brand-mark">T</div>
-        <div><strong>TeacherSheet</strong><small>Exercise Structure V1 · Free local engine</small></div>
+        <div><strong>TeacherSheet</strong><small>Exercise Structure V1 · Free local Vision + OCR</small></div>
         <div className="scope-chip">ללא API בתשלום</div>
       </header>
 
@@ -367,7 +423,7 @@ export function TeacherSheetFlow() {
         <section className="screen-card hero-screen">
           <div className="eyebrow">FREE · ON-DEVICE PROCESSING</div>
           <h1>איך תרצה להציג את דף התרגול?</h1>
-          <p>כל הפענוח הראשוני מתבצע במכשיר שלך. אין Google Document AI, אין OpenAI API, אין מפתחות ואין חיוב לפי שימוש.</p>
+          <p>במצלמה ובתמונה TeacherSheet משתמש ב-OCR כעזר ובמודל Vision מקומי שמסתכל על הדף עצמו. אין OpenAI API ואין חיוב לפי שימוש.</p>
 
           <div className="input-route-note">
             <strong>4 מסלולי קלט מקומיים</strong>
@@ -415,8 +471,8 @@ export function TeacherSheetFlow() {
               <div className="pipeline-box">
                 <b>מסלול הפענוח — ללא שירות בתשלום</b>
                 <span>1. {selectedMeta.firstStep}</span>
-                <span>2. TeacherSheet יזהה את סוג ומבנה התרגיל באמצעות כללים מקומיים</span>
-                <span>3. אם הביטחון נמוך, יוצע חיזוק חינמי דרך חשבון ChatGPT של המורה</span>
+                <span>2. TeacherSheet יחלץ סוג, הוראות וכל שורות התרגיל למודל מבני</span>
+                <span>3. אם רמת הביטחון עדיין נמוכה, יוצע חיזוק דרך חשבון ChatGPT של המורה</span>
               </div>
             </div>
           </div>
@@ -430,8 +486,8 @@ export function TeacherSheetFlow() {
           <div className="scan-sheet"><div className="scan-line" /></div>
           <h1>מפענח את דף התרגול במכשיר</h1>
           <p>{analysisStatus}</p>
-          <div className="local-progress" aria-label="OCR progress"><span style={{ width: `${Math.round(analysisProgress * 100)}%` }} /></div>
-          <div className="analysis-steps"><span className="done">✓ קליטת מקור</span><span className="working">● OCR / ניתוח מקומי</span><span>○ יצירת מודל תרגיל</span></div>
+          <div className="local-progress" aria-label="analysis progress"><span style={{ width: `${Math.round(analysisProgress * 100)}%` }} /></div>
+          <div className="analysis-steps"><span className="done">✓ קליטת מקור</span><span className="working">● OCR עזר / Vision מקומי</span><span>○ בניית מבנה התרגיל</span></div>
         </section>
       )}
 
@@ -492,7 +548,7 @@ export function TeacherSheetFlow() {
               <label className="toggle-row"><input type="checkbox" checked={analysis.hasWordBank} onChange={(e) => update("hasWordBank", e.target.checked)} /><span>קיים Word Bank במבנה המקורי</span></label>
               <details><summary>הטקסט שנקרא מהדף</summary><pre>{ocrText}</pre></details>
             </div>
-            <div className="blueprint-panel"><div className="blueprint-title">Structure preview</div><QuestionSkeleton analysis={{ ...analysis, questionCount: Math.min(analysis.questionCount, 5) }} /></div>
+            <div className="blueprint-panel"><div className="blueprint-title">Structure preview</div><QuestionSkeleton analysis={{ ...analysis, questionCount: Math.min(analysis.questionCount, 5), questions: analysis.questions.slice(0, 5) }} /></div>
           </div>
           <div className="action-row"><button className="secondary" onClick={reset}>התחל מחדש</button><button className="primary" onClick={() => setStep("draft")}>צור טיוטת דף מבנית</button></div>
         </section>
@@ -500,7 +556,7 @@ export function TeacherSheetFlow() {
 
       {step === "draft" && (
         <section className="screen-card draft-screen">
-          <div className="screen-heading"><div><div className="eyebrow">STRUCTURAL DRAFT</div><h1>טיוטת דף התרגול</h1></div><span className="status-dot">מבנה בלבד</span></div>
+          <div className="screen-heading"><div><div className="eyebrow">STRUCTURAL DRAFT</div><h1>טיוטת דף התרגול</h1></div><span className="status-dot">כל השורות שזוהו</span></div>
           <div className="scope-warning"><b>גבול גרסה זו:</b> זהו דף מבני בלבד. עדיין אין כאן הכנסת אוצר מילים, בדיקות איכות, Answer Key או הפקת הדף הסופי.</div>
           <QuestionSkeleton analysis={analysis} />
           <div className="action-row"><button className="secondary" onClick={() => setStep("decoded")}>ערוך פענוח</button><button className="primary" onClick={reset}>נתח דוגמה נוספת</button></div>
