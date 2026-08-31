@@ -157,6 +157,7 @@ export async function analyzeLocally(input: {
   let engine: AnalyzeResponse["engine"] = "text+local";
   let visionAnalysis: ExerciseAnalysis | null = null;
   let visionFailure = "";
+  let visionBackend: "webgpu" | "wasm" | "" = "";
 
   if (input.file) {
     const file = input.file;
@@ -179,12 +180,15 @@ export async function analyzeLocally(input: {
           visionAnalysis = vision.analysis;
           ocrText = vision.documentText;
           layout = vision.layout;
-          engine = "browser-docling+local";
+          visionBackend = vision.backend;
+          engine = vision.backend === "webgpu"
+            ? "browser-docling-webgpu+local"
+            : "browser-docling-wasm+local";
         } catch (error) {
           visionFailure = error instanceof Error ? error.message : "Document vision failed";
         }
       } else {
-        visionFailure = "WebGPU is unavailable on this browser/device.";
+        visionFailure = "Local document vision is unavailable in this browser context.";
       }
 
       if (!visionAnalysis) {
@@ -212,7 +216,7 @@ export async function analyzeLocally(input: {
     analysis,
     engine,
     warning: visionAnalysis
-      ? "התמונה שוחזרה באמצעות Granite-Docling, מודל Vision ייעודי למסמכים. הוא קורא טקסט ומבנה עמוד ישירות מהתמונה; OCR רגיל אינו המנוע הראשי."
+      ? `התמונה שוחזרה באמצעות Granite-Docling על ${visionBackend === "webgpu" ? "WebGPU" : "CPU/WASM"}. זהו מודל Vision ייעודי למסמכים; OCR רגיל אינו המנוע הראשי.`
       : visionFailure
         ? `מנוע המסמכים החכם לא הצליח (${visionFailure}). עברנו ל-OCR בסיסי רק כגיבוי, ולכן מומלץ להשתמש ב-ChatGPT אם המבנה אינו מדויק.`
         : "הפענוח מתבצע כולו במכשיר ללא API בתשלום. בתרגילים מורכבים מומלץ לבדוק ולתקן את הזיהוי במסך הבא."
