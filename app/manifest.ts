@@ -1,10 +1,12 @@
 import type { MetadataRoute } from "next";
 
+export const dynamic = "force-static";
+
 export default function manifest(): MetadataRoute.Manifest {
   return {
     name: "TeacherSheet",
     short_name: "TeacherSheet",
-    description: "Analyze worksheet structure from photos and documents.",
+    description: "Analyze worksheet structure locally from photos and documents.",
     start_url: "/",
     display: "standalone",
     background_color: "#f5f6fb",
