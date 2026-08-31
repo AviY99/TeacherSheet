@@ -256,17 +256,20 @@ export function TeacherSheetFlow() {
     setReturnText("");
     persistHandoff(handoff.id, handoff.prompt);
 
+    const shareApi = navigator as unknown as {
+      share?: (data?: ShareData) => Promise<void>;
+      canShare?: (data?: ShareData) => boolean;
+    };
     const canShareFile = Boolean(
       file &&
-      typeof navigator !== "undefined" &&
-      navigator.share &&
-      (!navigator.canShare || navigator.canShare({ files: [file] }))
+      typeof shareApi.share === "function" &&
+      (typeof shareApi.canShare !== "function" || shareApi.canShare({ files: [file] }))
     );
 
-    if (canShareFile && file) {
+    if (canShareFile && file && shareApi.share) {
       try {
         setHandoffStatus("בחר ChatGPT בחלון השיתוף. התמונה והוראות הפענוח מוכנות לשליחה.");
-        await navigator.share({
+        await shareApi.share({
           title: "TeacherSheet – שיפור זיהוי",
           text: handoff.prompt,
           files: [file]
