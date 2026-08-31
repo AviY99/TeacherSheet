@@ -1,4 +1,4 @@
-import type { AnswerFormat, ExerciseAnalysis, ExerciseType } from "./types";
+import type { AnswerFormat, DocumentLayoutBlock, ExerciseAnalysis, ExerciseType } from "./types";
 
 const defaults: Record<ExerciseType, { title: string; instructions: string; format: AnswerFormat }> = {
   fill_in_the_blanks: { title: "Fill in the blanks", instructions: "Complete the sentences.", format: "blank" },
@@ -12,27 +12,62 @@ const defaults: Record<ExerciseType, { title: string; instructions: string; form
   custom: { title: "English practice", instructions: "Complete the exercise.", format: "open" }
 };
 
-export function fallbackAnalyze(text: string): ExerciseAnalysis {
+function chooseType(text: string): ExerciseType {
   const low = text.toLowerCase();
-  const rules: Array<[ExerciseType, RegExp]> = [
-    ["fill_in_the_blanks", /fill in|complete the sentence|word bank|words in the box|_{3,}|\.{4,}/],
-    ["multiple_choice", /multiple choice|choose the correct|circle the correct|choose the best/],
-    ["matching", /match the|matching|match each/],
-    ["true_false", /true\s*\/\s*false|true or false|\bt\s*\/\s*f\b/],
-    ["unscramble", /unscramble|rearrange the letters|jumbled/],
-    ["translation", /translate|translation/],
-    ["reading_comprehension", /reading comprehension|read.+answer|answer the questions/],
-    ["sentence_writing", /write.+sentence|make a sentence|sentence writing/]
-  ];
-  let type: ExerciseType = "custom";
-  for (const [candidate, regex] of rules) if (regex.test(low)) type = candidate;
+  const scores = new Map<ExerciseType, number>();
+  const add = (type: ExerciseType, amount: number) => scores.set(type, (scores.get(type) || 0) + amount);
 
+  if (/fill in|fill the gaps?|complete the sentences?|word bank|words in the box|use the words/.test(low)) add("fill_in_the_blanks", 4);
+  if ((text.match(/_{2,}|\.{4,}/g) || []).length >= 2) add("fill_in_the_blanks", 3);
+  if (/multiple choice|choose the correct|circle the correct|choose the best/.test(low)) add("multiple_choice", 5);
+  if ((text.match(/(?:^|\s)[A-D][.)]\s+/gm) || []).length >= 4) add("multiple_choice", 3);
+  if (/match the|matching|match each|match column/.test(low)) add("matching", 5);
+  if (/true\s*\/\s*false|true or false|\bt\s*\/\s*f\b/.test(low)) add("true_false", 5);
+  if (/unscramble|rearrange the letters|jumbled|put the letters/.test(low)) add("unscramble", 5);
+  if (/translate|translation/.test(low)) add("translation", 5);
+  if (/reading comprehension|read.+answer|answer the questions|read the text/.test(low)) add("reading_comprehension", 4);
+  if (/write.+sentence|make a sentence|sentence writing|write sentences/.test(low)) add("sentence_writing", 4);
+
+  let best: ExerciseType = "custom";
+  let bestScore = 0;
+  for (const [type, score] of scores) {
+    if (score > bestScore) {
+      best = type;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+function detectLayoutNotes(layout: DocumentLayoutBlock[]) {
+  if (!layout.length) return ["Text-only local analysis; no reliable page coordinates were available."];
+  const notes: string[] = [];
+  const shortLines = layout.filter((line) => line.text.length > 0 && line.text.length < 35);
+  const left = shortLines.filter((line) => line.x < 0.42).length;
+  const right = shortLines.filter((line) => line.x > 0.52).length;
+  if (left >= 3 && right >= 3) notes.push("The page appears to contain more than one horizontal text region or column.");
+  if (layout.some((line) => /word bank|words in the box/i.test(line.text))) notes.push("A word-bank region was detected in the OCR layout.");
+  notes.push(`Local OCR supplied ${Math.min(layout.length, 160)} positioned text lines for structure hints.`);
+  return notes.slice(0, 4);
+}
+
+export function fallbackAnalyze(text: string, layout: DocumentLayoutBlock[] = []): ExerciseAnalysis {
+  const low = text.toLowerCase();
+  const type = chooseType(text);
   const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const numbered = lines.filter((line) => /^\d+[.)]\s*/.test(line));
-  const blanks = (text.match(/_{3,}|\.{4,}/g) || []).length;
-  const questionCount = Math.max(1, Math.min(30, numbered.length || blanks || 8));
-  const firstInstruction = lines.find((line) => !/^\d+[.)]/.test(line) && line.length >= 10 && line.length < 180);
+  const numbered = lines.filter((line) => /^\s*\d+[.)]\s*/.test(line));
+  const blanks = (text.match(/_{2,}|\.{4,}/g) || []).length;
+  const tfItems = lines.filter((line) => /\btrue\b.*\bfalse\b|\bt\s*\/\s*f\b/i.test(line)).length;
+  const questionCount = Math.max(1, Math.min(30, numbered.length || blanks || tfItems || 8));
+  const firstInstruction = lines.find((line) => !/^\s*\d+[.)]/.test(line) && line.length >= 10 && line.length < 180);
   const config = defaults[type];
+
+  const questionLines = numbered.length
+    ? numbered
+    : lines.filter((line) => /_{2,}|\.{4,}|\?$/.test(line)).slice(0, questionCount);
+
+  const confidenceBase = type === "custom" ? 0.38 : 0.58;
+  const confidenceBoost = Math.min(0.22, (numbered.length > 0 ? 0.08 : 0) + (blanks > 0 ? 0.08 : 0) + (firstInstruction ? 0.06 : 0));
 
   return {
     exerciseType: type,
@@ -41,13 +76,13 @@ export function fallbackAnalyze(text: string): ExerciseAnalysis {
     questionCount,
     answerFormat: config.format,
     hasWordBank: /word bank|words in the box|use the words|words below/.test(low),
-    confidence: 0.45,
-    layoutNotes: ["Local fallback analysis — connect OpenAI for semantic structure recognition."],
-    questions: numbered.slice(0, 30).map((line, index) => ({
+    confidence: Math.min(0.82, confidenceBase + confidenceBoost),
+    layoutNotes: detectLayoutNotes(layout),
+    questions: questionLines.slice(0, 30).map((line, index) => ({
       number: index + 1,
-      textPattern: line.replace(/^\d+[.)]\s*/, ""),
-      blankCount: (line.match(/_{3,}|\.{4,}/g) || []).length,
-      optionCount: 0
+      textPattern: line.replace(/^\s*\d+[.)]\s*/, ""),
+      blankCount: (line.match(/_{2,}|\.{4,}/g) || []).length,
+      optionCount: (line.match(/(?:^|\s)[A-D][.)]\s+/g) || []).length
     }))
   };
 }
