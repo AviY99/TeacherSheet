@@ -40,6 +40,7 @@ export interface DocumentLayoutBlock {
 }
 
 export type LocalAnalysisEngine =
+  | "browser-ocr+vision-local"
   | "browser-ocr+local"
   | "pdf-text+local"
   | "pdf-ocr+local"
