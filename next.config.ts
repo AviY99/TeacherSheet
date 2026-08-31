@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  poweredByHeader: false
+  poweredByHeader: false,
+  output: "export"
 };
 
 export default nextConfig;
