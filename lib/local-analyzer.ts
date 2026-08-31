@@ -115,36 +115,34 @@ async function recognizeSources(sources: OcrSource[], onProgress?: ProgressCallb
     const imageWidth = Number(result?.image?.width) || 1;
     const imageHeight = Number(result?.image?.height) || 1;
     const items = Array.isArray(result?.items) ? result.items : [];
-    const pageBlocks = items
-      .map((item: any) => {
+    const pageBlocks: DocumentLayoutBlock[] = items
+      .map((item: any): DocumentLayoutBlock | null => {
         const text = String(item?.text || "").replace(/\s+/g, " ").trim();
         if (!text) return null;
         const bounds = polygonBounds(item?.poly, imageWidth, imageHeight);
-        return {
-          page: pageIndex + 1,
-          text,
-          ...bounds
-        } satisfies DocumentLayoutBlock;
+        return { page: pageIndex + 1, text, ...bounds };
       })
       .filter((value: DocumentLayoutBlock | null): value is DocumentLayoutBlock => Boolean(value))
       .sort((a: DocumentLayoutBlock, b: DocumentLayoutBlock) => a.y - b.y || a.x - b.x);
 
     blocks.push(...pageBlocks);
-    texts.push(pageBlocks.map((block) => block.text).join("\n"));
+    texts.push(pageBlocks.map((block: DocumentLayoutBlock) => block.text).join("\n"));
     detectionMs = Math.max(detectionMs, Number(result?.metrics?.detMs) || 0);
     recognitionMs = Math.max(recognitionMs, Number(result?.metrics?.recMs) || 0);
     ocrTotalMs = Math.max(ocrTotalMs, Number(result?.metrics?.totalMs) || 0);
   });
 
+  const elapsed = now() - started;
   onProgress?.(`נקראו ${blocks.length} שורות/אזורים — בונה מבנה`, 0.78);
   return {
     text: texts.filter(Boolean).join("\n\n").trim(),
     blocks: blocks.slice(0, 320),
     metrics: {
-      extractionMs: now() - started,
+      totalMs: elapsed,
+      extractionMs: elapsed,
       ocrDetectionMs: detectionMs,
       ocrRecognitionMs: recognitionMs,
-      ocrTotalMs: ocrTotalMs || now() - started
+      ocrTotalMs: ocrTotalMs || elapsed
     } satisfies AnalysisMetrics
   };
 }
@@ -172,11 +170,12 @@ async function analyzePdf(file: File, onProgress?: ProgressCallback) {
 
   const extracted = textPages.filter(Boolean).join("\n\n").trim();
   if (extracted.length >= 40) {
+    const elapsed = now() - started;
     return {
       text: extracted,
       blocks: [] as DocumentLayoutBlock[],
       engine: "pdf-text+local" as const,
-      metrics: { extractionMs: now() - started } satisfies AnalysisMetrics
+      metrics: { totalMs: elapsed, extractionMs: elapsed } satisfies AnalysisMetrics
     };
   }
 
@@ -230,7 +229,9 @@ export async function analyzeLocally(input: {
       const result = await mammoth.extractRawText({ arrayBuffer });
       ocrText = result.value.trim();
       engine = "docx+local";
-      metrics.extractionMs = now() - started;
+      const elapsed = now() - started;
+      metrics.totalMs = elapsed;
+      metrics.extractionMs = elapsed;
     } else if (isPdf(file)) {
       const result = await analyzePdf(file, input.onProgress);
       ocrText = result.text;
@@ -248,9 +249,7 @@ export async function analyzeLocally(input: {
       throw new Error("פורמט הקובץ אינו נתמך בפענוח המקומי.");
     }
 
-    if (ocrText) {
-      await input.onCheckpoint?.({ ocrText, layout, engine, metrics });
-    }
+    if (ocrText) await input.onCheckpoint?.({ ocrText, layout, engine, metrics });
   }
 
   if (!ocrText) throw new Error("לא נמצא טקסט קריא במקור שהועלה.");
