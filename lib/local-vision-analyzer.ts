@@ -1,237 +1,154 @@
 "use client";
 
-import { streamText } from "ai";
-import { transformersJS } from "@browser-ai/transformers-js";
 import { fallbackAnalyze } from "./fallback-analyzer";
-import type { AnswerFormat, ExerciseAnalysis, ExerciseType } from "./types";
+import type { DocumentLayoutBlock, ExerciseAnalysis } from "./types";
 
-const MODEL_ID = "HuggingFaceTB/SmolVLM-256M-Instruct";
+const MODEL_ID = "onnx-community/granite-docling-258M-ONNX";
+const LOC_SCALE = 500;
 
-const allowedTypes = new Set<ExerciseType>([
-  "fill_in_the_blanks",
-  "multiple_choice",
-  "matching",
-  "true_false",
-  "unscramble",
-  "translation",
-  "reading_comprehension",
-  "sentence_writing",
-  "custom"
-]);
+type ProgressCallback = (message: string, progress?: number) => void;
+type DoclingEngine = { processor: any; model: any; RawImage: any };
 
-const allowedFormats = new Set<AnswerFormat>(["blank", "choice", "matching", "true_false", "open"]);
+let enginePromise: Promise<DoclingEngine> | null = null;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
-function normalizeType(value: string, fallback: ExerciseType): ExerciseType {
-  const clean = value.trim().toLowerCase().replace(/[ -]+/g, "_");
-  if (allowedTypes.has(clean as ExerciseType)) return clean as ExerciseType;
-  if (/fill|blank|gap/.test(clean)) return "fill_in_the_blanks";
-  if (/multiple|choice|choose/.test(clean)) return "multiple_choice";
-  if (/match/.test(clean)) return "matching";
-  if (/true|false/.test(clean)) return "true_false";
-  if (/unscram|rearrange|jumbl/.test(clean)) return "unscramble";
-  if (/translat/.test(clean)) return "translation";
-  if (/reading|comprehension/.test(clean)) return "reading_comprehension";
-  if (/sentence|writing/.test(clean)) return "sentence_writing";
-  return fallback;
-}
-
-function normalizeFormat(value: string, fallback: AnswerFormat): AnswerFormat {
-  const clean = value.trim().toLowerCase().replace(/[ -]+/g, "_");
-  if (allowedFormats.has(clean as AnswerFormat)) return clean as AnswerFormat;
-  if (/blank|gap/.test(clean)) return "blank";
-  if (/choice|select/.test(clean)) return "choice";
-  if (/match/.test(clean)) return "matching";
-  if (/true|false/.test(clean)) return "true_false";
-  return fallback;
-}
-
-function cleanModelText(raw: string) {
-  return raw
-    .replace(/```[a-z]*\s*/gi, "")
-    .replace(/```/g, "")
-    .replace(/^\s*[-*•]\s*/gm, "")
+function cleanElementText(value: string) {
+  return value
+    .replace(/<loc_\d+>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
     .trim();
 }
 
-function field(lines: string[], names: string[]) {
-  const wanted = names.map((name) => name.toUpperCase());
-  for (const line of lines) {
-    const normalized = line.trim();
-    const separator = normalized.includes("|") ? "|" : ":";
-    const index = normalized.indexOf(separator);
-    if (index < 0) continue;
-    const key = normalized.slice(0, index).trim().toUpperCase().replace(/\s+/g, "_");
-    if (wanted.includes(key)) return normalized.slice(index + 1).trim();
+function parseDocTags(doctags: string) {
+  const blocks: DocumentLayoutBlock[] = [];
+  const lines: string[] = [];
+  const elementPattern = /<([a-z0-9_]+)>\s*<loc_(\d+)>\s*<loc_(\d+)>\s*<loc_(\d+)>\s*<loc_(\d+)>([\s\S]*?)<\/\1>/gi;
+
+  let match: RegExpExecArray | null;
+  while ((match = elementPattern.exec(doctags))) {
+    const tag = match[1].toLowerCase();
+    const text = cleanElementText(match[6]);
+    if (!text) continue;
+
+    // Purely graphical regions do not help worksheet structure unless they contain readable text.
+    if (["picture", "figure"].includes(tag)) continue;
+
+    const left = Number(match[2]);
+    const top = Number(match[3]);
+    const right = Number(match[4]);
+    const bottom = Number(match[5]);
+
+    lines.push(text);
+    blocks.push({
+      page: 1,
+      text,
+      x: clamp(left / LOC_SCALE, 0, 1),
+      y: clamp(top / LOC_SCALE, 0, 1),
+      width: clamp((right - left) / LOC_SCALE, 0, 1),
+      height: clamp((bottom - top) / LOC_SCALE, 0, 1)
+    });
   }
-  return "";
-}
 
-function parseQuestionLine(line: string, fallbackNumber: number) {
-  const tagged = line.match(/^\s*Q\s*\|\s*(\d+)\s*\|\s*(.*?)\s*\|\s*(?:BLANKS?\s*=\s*)?(\d+)\s*\|\s*(?:OPTIONS?\s*=\s*)?(\d+)\s*$/i);
-  if (tagged) {
-    return {
-      number: clamp(Number(tagged[1]) || fallbackNumber, 1, 99),
-      textPattern: tagged[2].trim().slice(0, 700),
-      blankCount: clamp(Number(tagged[3]) || 0, 0, 20),
-      optionCount: clamp(Number(tagged[4]) || 0, 0, 10)
-    };
+  if (!lines.length) {
+    const plain = doctags
+      .replace(/<loc_\d+>/gi, "")
+      .replace(/<\/(?:text|page_header|page_footer|section_header[^>]*|list_item|caption|formula|code)>/gi, "\n")
+      .replace(/<[^>]+>/g, " ")
+      .split(/\r?\n/)
+      .map((line) => line.replace(/\s+/g, " ").trim())
+      .filter(Boolean);
+    lines.push(...plain);
   }
 
-  const taggedLoose = line.match(/^\s*Q\s*\|\s*(\d+)\s*\|\s*(.+)$/i);
-  const numbered = line.match(/^\s*(?:Q\s*)?(\d+)\s*[.)|:-]\s*(.+)$/i);
-  const match = taggedLoose || numbered;
-  if (!match) return null;
-
-  const text = match[2].trim().replace(/\s*\|\s*(?:BLANKS?|OPTIONS?)\s*=\s*\d+.*$/i, "").slice(0, 700);
-  if (!text) return null;
   return {
-    number: clamp(Number(match[1]) || fallbackNumber, 1, 99),
-    textPattern: text,
-    blankCount: clamp((text.match(/\[BLANK\]|_{2,}|\.{4,}/gi) || []).length, 0, 20),
-    optionCount: clamp((text.match(/(?:^|\s)[A-F][.)]\s+/g) || []).length, 0, 10)
+    text: lines.join("\n").trim(),
+    blocks: blocks.slice(0, 300)
   };
 }
 
-function parseTaggedAnalysis(raw: string, ocrText: string): ExerciseAnalysis {
-  const baseline = fallbackAnalyze(ocrText);
-  const clean = cleanModelText(raw);
-  const lines = clean.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-
-  const questions = lines
-    .map((line, index) => parseQuestionLine(line, index + 1))
-    .filter((value): value is NonNullable<ReturnType<typeof parseQuestionLine>> => Boolean(value))
-    .slice(0, 30);
-
-  const typeValue = field(lines, ["TYPE", "EXERCISE_TYPE"]);
-  const titleValue = field(lines, ["TITLE"]);
-  const instructionValue = field(lines, ["INSTRUCTION", "INSTRUCTIONS"]);
-  const formatValue = field(lines, ["FORMAT", "ANSWER_FORMAT"]);
-  const wordBankValue = field(lines, ["WORD_BANK", "WORDBANK"]);
-  const confidenceValue = field(lines, ["CONFIDENCE"]);
-  const countValue = field(lines, ["COUNT", "QUESTION_COUNT"]);
-
-  const useful = questions.length > 0 || Boolean(typeValue || titleValue || instructionValue || formatValue);
-  if (!useful) throw new Error("Local vision model returned no parseable worksheet structure.");
-
-  const exerciseType = normalizeType(typeValue, baseline.exerciseType);
-  const answerFormat = normalizeFormat(formatValue, baseline.answerFormat);
-  const explicitCount = clamp(Math.round(Number(countValue) || 0), 0, 30);
-  const questionCount = questions.length || explicitCount || baseline.questionCount;
-  const explicitConfidence = Number.parseFloat(confidenceValue.replace(/[^0-9.]/g, ""));
-  const inferredConfidence = questions.length >= 3 ? 0.76 : 0.67;
-
-  return {
-    exerciseType,
-    title: (titleValue || baseline.title).slice(0, 120),
-    instructions: (instructionValue || baseline.instructions).slice(0, 700),
-    questionCount: clamp(questionCount, 1, 30),
-    answerFormat,
-    hasWordBank: wordBankValue
-      ? /^(yes|true|1|כן)$/i.test(wordBankValue.trim())
-      : baseline.hasWordBank,
-    confidence: clamp(Number.isFinite(explicitConfidence) ? explicitConfidence : inferredConfidence, 0, 0.9),
-    layoutNotes: [
-      "Local vision inspected the worksheet image directly.",
-      questions.length ? `Vision recovered ${questions.length} visible exercise rows.` : "Vision returned worksheet-level structure only."
-    ],
-    questions: questions.length ? questions : baseline.questions
-  };
+async function loadEngine(onProgress?: ProgressCallback): Promise<DoclingEngine> {
+  if (!enginePromise) {
+    enginePromise = (async () => {
+      onProgress?.("טוען מנוע מסמכים חכם למכשיר — ההפעלה הראשונה עשויה לקחת זמן", 0.08);
+      const hf: any = await import("@huggingface/transformers");
+      const processor = await hf.AutoProcessor.from_pretrained(MODEL_ID);
+      onProgress?.("טוען את מודל Granite-Docling המקומי", 0.18);
+      const model = await hf.AutoModelForVision2Seq.from_pretrained(MODEL_ID, {
+        device: "webgpu",
+        dtype: "q4"
+      });
+      return { processor, model, RawImage: hf.RawImage };
+    })().catch((error) => {
+      enginePromise = null;
+      throw error;
+    });
+  }
+  return enginePromise;
 }
 
 export function localVisionSupported() {
   return typeof window !== "undefined" && typeof navigator !== "undefined" && "gpu" in navigator;
 }
 
-async function runVisionModel(model: ReturnType<typeof transformersJS>, prompt: string, imageBytes: Uint8Array, mediaType: string) {
-  const result = streamText({
-    model,
-    messages: [
-      {
-        role: "user",
-        content: [
-          { type: "text", text: prompt },
-          { type: "image", image: imageBytes, mediaType }
-        ]
-      }
-    ],
-    maxOutputTokens: 1500,
-    temperature: 0
-  });
-
-  let raw = "";
-  for await (const chunk of result.textStream) raw += chunk;
-  return raw.trim();
-}
-
-function primaryPrompt(ocrText: string) {
-  return `Look at the worksheet IMAGE. Recover its exercise structure.
-OCR below is only a hint and can be wrong. Trust the image when they disagree.
-
-Do NOT write JSON. Do NOT use markdown. Output simple lines exactly like this:
-TYPE|fill_in_the_blanks
-TITLE|title visible on page
-INSTRUCTION|instruction visible on page
-FORMAT|blank
-WORD_BANK|YES
-CONFIDENCE|0.82
-Q|1|first visible exercise item|BLANKS=1|OPTIONS=0
-Q|2|second visible exercise item|BLANKS=1|OPTIONS=0
-END
-
-Rules:
-- One Q line for EVERY visible exercise item, top to bottom. Never omit a row.
-- TYPE must be one of: fill_in_the_blanks, multiple_choice, matching, true_false, unscramble, translation, reading_comprehension, sentence_writing, custom.
-- FORMAT must be one of: blank, choice, matching, true_false, open.
-- Copy visible exercise wording as faithfully as possible.
-- Do not invent answers, vocabulary, answer keys, or new content.
-
-OCR HINT:
-${ocrText.slice(0, 9000)}`;
-}
-
-function retryPrompt(ocrText: string) {
-  return `Inspect the worksheet image and list its structure. Plain text only. No JSON. No markdown.
-First line: TYPE|exercise_type
-Then output ONE line for EACH visible exercise row:
-Q|1|visible row text|0|0
-Q|2|visible row text|0|0
-Continue until every row is included. Finish with END.
-Use the image as truth. OCR is only a weak hint:
-${ocrText.slice(0, 6000)}`;
-}
-
 export async function analyzeWithLocalVision(input: {
   image: File | Blob;
-  ocrText: string;
-  onProgress?: (message: string, progress?: number) => void;
-}): Promise<ExerciseAnalysis> {
+  ocrText?: string;
+  onProgress?: ProgressCallback;
+}): Promise<{ analysis: ExerciseAnalysis; documentText: string; layout: DocumentLayoutBlock[] }> {
   if (!localVisionSupported()) throw new Error("WebGPU is not available on this device/browser.");
 
-  input.onProgress?.("טוען מנוע בינה חזותית מקומי — בפעם הראשונה המודל יורד למכשיר", 0.72);
+  const { processor, model, RawImage } = await loadEngine(input.onProgress);
+  input.onProgress?.("Granite-Docling קורא את התמונה ואת מבנה העמוד", 0.35);
 
-  const model = transformersJS(MODEL_ID, {
-    isVisionModel: true,
-    device: "webgpu"
+  const image = await RawImage.fromBlob(input.image);
+  const messages = [
+    {
+      role: "user",
+      content: [
+        { type: "image" },
+        { type: "text", text: "Convert this page to docling." }
+      ]
+    }
+  ];
+
+  const prompt = processor.apply_chat_template(messages, { add_generation_prompt: true });
+  const inputs = await processor(prompt, [image], {
+    do_image_splitting: true
   });
-  const imageBytes = new Uint8Array(await input.image.arrayBuffer());
-  const mediaType = input.image.type || "image/jpeg";
 
-  input.onProgress?.("הבינה החזותית קוראת את מבנה הדף", 0.82);
-  const firstRaw = await runVisionModel(model, primaryPrompt(input.ocrText), imageBytes, mediaType);
-  try {
-    const parsed = parseTaggedAnalysis(firstRaw, input.ocrText);
-    input.onProgress?.("הבינה המקומית סידרה את כל שורות התרגיל", 0.97);
-    return parsed;
-  } catch {
-    input.onProgress?.("מבצע ניסיון Vision שני בפורמט פשוט יותר", 0.9);
-  }
+  input.onProgress?.("הבינה המקומית משחזרת את כל רכיבי הדף", 0.55);
+  const generatedIds = await model.generate({
+    ...inputs,
+    max_new_tokens: 4096,
+    do_sample: false
+  });
 
-  const retryRaw = await runVisionModel(model, retryPrompt(input.ocrText), imageBytes, mediaType);
-  const parsed = parseTaggedAnalysis(retryRaw, input.ocrText);
-  input.onProgress?.("הבינה המקומית סידרה את כל שורות התרגיל", 0.97);
-  return { ...parsed, confidence: Math.min(parsed.confidence, 0.82) };
+  const decoded = processor.batch_decode(generatedIds, {
+    skip_special_tokens: false
+  })?.[0] || "";
+
+  const docStart = decoded.indexOf("<doctag>");
+  const rawDocTags = docStart >= 0 ? decoded.slice(docStart) : decoded;
+  const parsed = parseDocTags(rawDocTags);
+  if (parsed.text.length < 20) throw new Error("Granite-Docling returned too little readable document text.");
+
+  input.onProgress?.("מזהה את סוג התרגיל מתוך המסמך ששוחזר", 0.9);
+  const baseline = fallbackAnalyze(parsed.text, parsed.blocks);
+  const recoveredRows = Math.max(baseline.questions.length, parsed.blocks.filter((block) => /\d+[.)]|_{2,}|\.{4,}|\?$/.test(block.text)).length);
+  const analysis: ExerciseAnalysis = {
+    ...baseline,
+    confidence: clamp(Math.max(baseline.confidence, recoveredRows >= 3 ? 0.76 : 0.68), 0, 0.88),
+    layoutNotes: [
+      "Granite-Docling reconstructed the worksheet directly from the uploaded image.",
+      `Document vision recovered ${parsed.blocks.length || parsed.text.split(/\n/).length} ordered page elements.`,
+      ...baseline.layoutNotes
+    ].slice(0, 8)
+  };
+
+  input.onProgress?.("מבנה הדף שוחזר", 1);
+  return { analysis, documentText: parsed.text, layout: parsed.blocks };
 }
