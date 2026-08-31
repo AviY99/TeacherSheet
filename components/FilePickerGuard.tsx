@@ -37,19 +37,33 @@ function matchesRoute(file: File, kind: RouteKind) {
   return true;
 }
 
-function pickerOptions(kind: Exclude<RouteKind, "image" | null>): PickerOptions {
+function pickerOptions(kind: Exclude<RouteKind, null>): PickerOptions {
   if (kind === "pdf") {
     return {
       multiple: false,
       types: [{ description: "PDF", accept: { "application/pdf": [".pdf"] } }]
     };
   }
+  if (kind === "word") {
+    return {
+      multiple: false,
+      types: [{
+        description: "Word document",
+        accept: {
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"]
+        }
+      }]
+    };
+  }
   return {
     multiple: false,
     types: [{
-      description: "Word document",
+      description: "Image",
       accept: {
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"]
+        "image/jpeg": [".jpg", ".jpeg"],
+        "image/png": [".png"],
+        "image/webp": [".webp"],
+        "image/tiff": [".tif", ".tiff"]
       }
     }]
   };
@@ -71,7 +85,7 @@ export function FilePickerGuard() {
       if (!input || input.type !== "file" || input.hasAttribute("capture")) return;
 
       const kind = routeKind(input);
-      if (kind !== "pdf" && kind !== "word") return;
+      if (!kind) return;
 
       const picker = (window as PickerWindow).showOpenFilePicker;
       if (typeof picker !== "function") return;
