@@ -4,8 +4,8 @@
   "private": true,
   "engines": { "node": ">=22" },
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
+    "dev": "next dev --webpack",
+    "build": "next build --webpack",
     "typecheck": "tsc --noEmit",
     "test:compat": "playwright test"
   },
