@@ -39,7 +39,25 @@ export interface DocumentLayoutBlock {
   height: number;
 }
 
+export interface AnalysisMetrics {
+  totalMs: number;
+  extractionMs?: number;
+  ocrDetectionMs?: number;
+  ocrRecognitionMs?: number;
+  ocrTotalMs?: number;
+  structureMs?: number;
+  resumed?: boolean;
+}
+
+export interface LocalAnalysisCheckpoint {
+  ocrText: string;
+  layout: DocumentLayoutBlock[];
+  engine: LocalAnalysisEngine;
+  metrics?: AnalysisMetrics;
+}
+
 export type LocalAnalysisEngine =
+  | "browser-paddleocr+local"
   | "browser-docling-webgpu+local"
   | "browser-docling-wasm+local"
   | "browser-docling+local"
@@ -55,4 +73,5 @@ export interface AnalyzeResponse {
   analysis: ExerciseAnalysis;
   engine: LocalAnalysisEngine;
   warning?: string;
+  metrics?: AnalysisMetrics;
 }
