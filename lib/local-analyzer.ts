@@ -2,13 +2,22 @@
 
 import mammoth from "mammoth";
 import { fallbackAnalyze } from "./fallback-analyzer";
-import { analyzeWithLocalVision, localVisionSupported } from "./local-vision-analyzer";
-import type { AnalyzeResponse, DocumentLayoutBlock, ExerciseAnalysis } from "./types";
+import type {
+  AnalysisMetrics,
+  AnalyzeResponse,
+  DocumentLayoutBlock,
+  LocalAnalysisCheckpoint
+} from "./types";
 
 type ProgressCallback = (message: string, progress?: number) => void;
 type OcrSource = File | HTMLCanvasElement;
 
 const PDF_WORKER_URL = "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.3.289/build/pdf.worker.min.mjs";
+let paddlePromise: Promise<any> | null = null;
+
+function now() {
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
 
 function isDocx(file: File) {
   return file.name.toLowerCase().endsWith(".docx") || file.type.includes("wordprocessingml");
@@ -18,89 +27,130 @@ function isPdf(file: File) {
   return file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
 }
 
-function parseTsvToLines(tsv: string): DocumentLayoutBlock[] {
-  const rows = tsv.split(/\r?\n/).slice(1);
-  const groups = new Map<string, { page: number; words: string[]; left: number; top: number; right: number; bottom: number }>();
-  let maxRight = 1;
-  let maxBottom = 1;
+function pointPair(value: unknown): [number, number] | null {
+  if (Array.isArray(value) && value.length >= 2) {
+    const x = Number(value[0]);
+    const y = Number(value[1]);
+    return Number.isFinite(x) && Number.isFinite(y) ? [x, y] : null;
+  }
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const x = Number(record.x);
+    const y = Number(record.y);
+    return Number.isFinite(x) && Number.isFinite(y) ? [x, y] : null;
+  }
+  return null;
+}
 
-  for (const row of rows) {
-    if (!row.trim()) continue;
-    const cols = row.split("\t");
-    if (cols.length < 12 || cols[0] !== "5") continue;
-    const page = Number(cols[1] || 1);
-    const block = cols[2] || "0";
-    const paragraph = cols[3] || "0";
-    const line = cols[4] || "0";
-    const left = Number(cols[6] || 0);
-    const top = Number(cols[7] || 0);
-    const width = Number(cols[8] || 0);
-    const height = Number(cols[9] || 0);
-    const word = (cols[11] || "").trim();
-    if (!word) continue;
-
-    const right = left + width;
-    const bottom = top + height;
-    maxRight = Math.max(maxRight, right);
-    maxBottom = Math.max(maxBottom, bottom);
-    const key = `${page}:${block}:${paragraph}:${line}`;
-    const current = groups.get(key);
-    if (current) {
-      current.words.push(word);
-      current.left = Math.min(current.left, left);
-      current.top = Math.min(current.top, top);
-      current.right = Math.max(current.right, right);
-      current.bottom = Math.max(current.bottom, bottom);
+function polygonBounds(poly: unknown, imageWidth: number, imageHeight: number) {
+  let points: [number, number][] = [];
+  if (Array.isArray(poly)) {
+    if (poly.every((value) => typeof value === "number") && poly.length >= 8) {
+      for (let index = 0; index + 1 < poly.length; index += 2) {
+        points.push([Number(poly[index]), Number(poly[index + 1])]);
+      }
     } else {
-      groups.set(key, { page, words: [word], left, top, right, bottom });
+      points = poly.map(pointPair).filter((value): value is [number, number] => Boolean(value));
     }
   }
+  if (!points.length) return { x: 0, y: 0, width: 1, height: 0.02 };
+  const xs = points.map((point) => point[0]);
+  const ys = points.map((point) => point[1]);
+  const left = Math.min(...xs);
+  const top = Math.min(...ys);
+  const right = Math.max(...xs);
+  const bottom = Math.max(...ys);
+  const width = Math.max(1, imageWidth);
+  const height = Math.max(1, imageHeight);
+  return {
+    x: Math.max(0, Math.min(1, left / width)),
+    y: Math.max(0, Math.min(1, top / height)),
+    width: Math.max(0, Math.min(1, (right - left) / width)),
+    height: Math.max(0, Math.min(1, (bottom - top) / height))
+  };
+}
 
-  return [...groups.values()]
-    .sort((a, b) => a.page - b.page || a.top - b.top || a.left - b.left)
-    .slice(0, 240)
-    .map((line) => ({
-      page: line.page,
-      text: line.words.join(" "),
-      x: line.left / maxRight,
-      y: line.top / maxBottom,
-      width: (line.right - line.left) / maxRight,
-      height: (line.bottom - line.top) / maxBottom
-    }));
+async function getPaddleOcr(onProgress?: ProgressCallback) {
+  if (!paddlePromise) {
+    paddlePromise = (async () => {
+      onProgress?.("טוען OCR מהיר ב-Worker — בפעם הראשונה יורדים מודלים קטנים למכשיר", 0.08);
+      const { PaddleOCR } = await import("@paddleocr/paddleocr-js");
+      return PaddleOCR.create({
+        lang: "en",
+        ocrVersion: "PP-OCRv6",
+        worker: true,
+        textDetectionBatchSize: 1,
+        textRecognitionBatchSize: 8,
+        ortOptions: {
+          backend: "wasm",
+          numThreads: 1,
+          simd: true
+        }
+      });
+    })().catch((error) => {
+      paddlePromise = null;
+      throw error;
+    });
+  }
+  return paddlePromise;
 }
 
 async function recognizeSources(sources: OcrSource[], onProgress?: ProgressCallback) {
-  const { createWorker } = await import("tesseract.js");
-  const worker = await createWorker("eng", 1, {
-    logger: (message: { status?: string; progress?: number }) => {
-      if (!message.status) return;
-      onProgress?.(`OCR fallback: ${message.status}`, typeof message.progress === "number" ? message.progress * 0.7 : undefined);
-    }
+  const started = now();
+  const ocr = await getPaddleOcr(onProgress);
+  onProgress?.("מזהה את כל אזורי הטקסט והשורות ברקע", 0.28);
+  const results: any[] = await ocr.predict(sources, {
+    textDetLimitSideLen: 1600,
+    textDetLimitType: "max",
+    textRecScoreThresh: 0.25
   });
 
   const texts: string[] = [];
   const blocks: DocumentLayoutBlock[] = [];
-  try {
-    for (let index = 0; index < sources.length; index += 1) {
-      onProgress?.(`OCR fallback: עמוד ${index + 1} מתוך ${sources.length}`, 0.08 + index / Math.max(1, sources.length) * 0.5);
-      const result: any = await worker.recognize(
-        sources[index],
-        { rotateAuto: true },
-        { text: true, tsv: true }
-      );
-      const text = String(result?.data?.text || "").trim();
-      if (text) texts.push(text);
-      const pageBlocks = parseTsvToLines(String(result?.data?.tsv || ""));
-      blocks.push(...pageBlocks.map((block) => ({ ...block, page: index + 1 })));
-    }
-  } finally {
-    await worker.terminate();
-  }
+  let detectionMs = 0;
+  let recognitionMs = 0;
+  let ocrTotalMs = 0;
 
-  return { text: texts.join("\n\n").trim(), blocks: blocks.slice(0, 240) };
+  results.forEach((result, pageIndex) => {
+    const imageWidth = Number(result?.image?.width) || 1;
+    const imageHeight = Number(result?.image?.height) || 1;
+    const items = Array.isArray(result?.items) ? result.items : [];
+    const pageBlocks = items
+      .map((item: any) => {
+        const text = String(item?.text || "").replace(/\s+/g, " ").trim();
+        if (!text) return null;
+        const bounds = polygonBounds(item?.poly, imageWidth, imageHeight);
+        return {
+          page: pageIndex + 1,
+          text,
+          ...bounds
+        } satisfies DocumentLayoutBlock;
+      })
+      .filter((value: DocumentLayoutBlock | null): value is DocumentLayoutBlock => Boolean(value))
+      .sort((a: DocumentLayoutBlock, b: DocumentLayoutBlock) => a.y - b.y || a.x - b.x);
+
+    blocks.push(...pageBlocks);
+    texts.push(pageBlocks.map((block) => block.text).join("\n"));
+    detectionMs = Math.max(detectionMs, Number(result?.metrics?.detMs) || 0);
+    recognitionMs = Math.max(recognitionMs, Number(result?.metrics?.recMs) || 0);
+    ocrTotalMs = Math.max(ocrTotalMs, Number(result?.metrics?.totalMs) || 0);
+  });
+
+  onProgress?.(`נקראו ${blocks.length} שורות/אזורים — בונה מבנה`, 0.78);
+  return {
+    text: texts.filter(Boolean).join("\n\n").trim(),
+    blocks: blocks.slice(0, 320),
+    metrics: {
+      extractionMs: now() - started,
+      ocrDetectionMs: detectionMs,
+      ocrRecognitionMs: recognitionMs,
+      ocrTotalMs: ocrTotalMs || now() - started
+    } satisfies AnalysisMetrics
+  };
 }
 
 async function analyzePdf(file: File, onProgress?: ProgressCallback) {
+  const started = now();
   const pdfjs: any = await import("pdfjs-dist");
   pdfjs.GlobalWorkerOptions.workerSrc = PDF_WORKER_URL;
   const data = new Uint8Array(await file.arrayBuffer());
@@ -108,7 +158,7 @@ async function analyzePdf(file: File, onProgress?: ProgressCallback) {
   const textPages: string[] = [];
 
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-    onProgress?.(`קורא טקסט מ-PDF: עמוד ${pageNumber}/${pdf.numPages}`, pageNumber / pdf.numPages * 0.7);
+    onProgress?.(`קורא טקסט מ-PDF: עמוד ${pageNumber}/${pdf.numPages}`, pageNumber / pdf.numPages * 0.62);
     const page = await pdf.getPage(pageNumber);
     const content = await page.getTextContent();
     const parts: string[] = [];
@@ -122,15 +172,20 @@ async function analyzePdf(file: File, onProgress?: ProgressCallback) {
 
   const extracted = textPages.filter(Boolean).join("\n\n").trim();
   if (extracted.length >= 40) {
-    return { text: extracted, blocks: [] as DocumentLayoutBlock[], engine: "pdf-text+local" as const };
+    return {
+      text: extracted,
+      blocks: [] as DocumentLayoutBlock[],
+      engine: "pdf-text+local" as const,
+      metrics: { extractionMs: now() - started } satisfies AnalysisMetrics
+    };
   }
 
-  onProgress?.("ה-PDF נראה סרוק — מפעיל OCR מקומי", 0.12);
+  onProgress?.("ה-PDF סרוק — מעביר את העמודים ל-OCR Worker", 0.1);
   const canvases: HTMLCanvasElement[] = [];
   const pageLimit = Math.min(pdf.numPages, 3);
   for (let pageNumber = 1; pageNumber <= pageLimit; pageNumber += 1) {
     const page = await pdf.getPage(pageNumber);
-    const viewport = page.getViewport({ scale: 2.4 });
+    const viewport = page.getViewport({ scale: 2.1 });
     const canvas = document.createElement("canvas");
     canvas.width = Math.ceil(viewport.width);
     canvas.height = Math.ceil(viewport.height);
@@ -147,78 +202,80 @@ async function analyzePdf(file: File, onProgress?: ProgressCallback) {
 export async function analyzeLocally(input: {
   file?: File | null;
   text?: string;
+  resume?: LocalAnalysisCheckpoint | null;
   onProgress?: ProgressCallback;
+  onCheckpoint?: (checkpoint: LocalAnalysisCheckpoint) => void | Promise<void>;
 }): Promise<AnalyzeResponse> {
+  const totalStarted = now();
   const typedText = input.text?.trim() || "";
-  if (!input.file && !typedText) throw new Error("לא התקבל מקור לפענוח.");
+  if (!input.file && !typedText && !input.resume) throw new Error("לא התקבל מקור לפענוח.");
 
   let ocrText = typedText;
   let layout: DocumentLayoutBlock[] = [];
   let engine: AnalyzeResponse["engine"] = "text+local";
-  let visionAnalysis: ExerciseAnalysis | null = null;
-  let visionFailure = "";
-  let visionBackend: "webgpu" | "wasm" | "" = "";
+  let metrics: AnalysisMetrics = { totalMs: 0 };
 
-  if (input.file) {
+  if (input.resume?.ocrText) {
+    input.onProgress?.("ממשיך מהשלב האחרון שנשמר — לא קורא שוב את הדף", 0.76);
+    ocrText = input.resume.ocrText;
+    layout = input.resume.layout || [];
+    engine = input.resume.engine;
+    metrics = { ...(input.resume.metrics || { totalMs: 0 }), resumed: true };
+  } else if (input.file) {
     const file = input.file;
     if (isDocx(file)) {
+      const started = now();
       input.onProgress?.("מחלץ טקסט מקובץ Word מקומית", 0.35);
       const arrayBuffer = await file.arrayBuffer();
       const result = await mammoth.extractRawText({ arrayBuffer });
       ocrText = result.value.trim();
       engine = "docx+local";
+      metrics.extractionMs = now() - started;
     } else if (isPdf(file)) {
       const result = await analyzePdf(file, input.onProgress);
       ocrText = result.text;
       layout = result.blocks;
       engine = result.engine;
+      metrics = { ...metrics, ...result.metrics };
     } else if (file.type.startsWith("image/")) {
-      if (localVisionSupported()) {
-        try {
-          input.onProgress?.("מפעיל בינה חזותית ייעודית למסמכים", 0.04);
-          const vision = await analyzeWithLocalVision({ image: file, onProgress: input.onProgress });
-          visionAnalysis = vision.analysis;
-          ocrText = vision.documentText;
-          layout = vision.layout;
-          visionBackend = vision.backend;
-          engine = vision.backend === "webgpu"
-            ? "browser-docling-webgpu+local"
-            : "browser-docling-wasm+local";
-        } catch (error) {
-          visionFailure = error instanceof Error ? error.message : "Document vision failed";
-        }
-      } else {
-        visionFailure = "Local document vision is unavailable in this browser context.";
-      }
-
-      if (!visionAnalysis) {
-        input.onProgress?.("מנוע המסמכים לא הצליח — עובר ל-OCR בסיסי כגיבוי", 0.08);
-        const result = await recognizeSources([file], input.onProgress);
-        ocrText = result.text;
-        layout = result.blocks;
-        engine = "browser-ocr+local";
-      }
+      input.onProgress?.("Fast path: מפעיל PP-OCRv6 ב-Worker נפרד", 0.04);
+      const result = await recognizeSources([file], input.onProgress);
+      ocrText = result.text;
+      layout = result.blocks;
+      engine = "browser-paddleocr+local";
+      metrics = { ...metrics, ...result.metrics };
     } else {
       throw new Error("פורמט הקובץ אינו נתמך בפענוח המקומי.");
     }
+
+    if (ocrText) {
+      await input.onCheckpoint?.({ ocrText, layout, engine, metrics });
+    }
   }
 
-  if (!ocrText && !visionAnalysis) throw new Error("לא נמצא טקסט קריא במקור שהועלה.");
-  input.onProgress?.("בונה מודל מבני של התרגיל", 1);
+  if (!ocrText) throw new Error("לא נמצא טקסט קריא במקור שהועלה.");
 
-  let analysis = visionAnalysis || fallbackAnalyze(ocrText, layout);
-  if (!visionAnalysis && input.file?.type.startsWith("image/")) {
-    analysis = { ...analysis, confidence: Math.min(analysis.confidence, 0.62) };
+  input.onProgress?.("מזהה את סוג התרגיל ומסדר את השורות", 0.88);
+  const structureStarted = now();
+  let analysis = fallbackAnalyze(ocrText, layout);
+  metrics.structureMs = now() - structureStarted;
+
+  if (input.file?.type.startsWith("image/")) {
+    const lineCount = layout.length || ocrText.split(/\n/).filter(Boolean).length;
+    const completeness = lineCount >= Math.max(3, analysis.questionCount) ? 0.78 : 0.68;
+    analysis = { ...analysis, confidence: Math.min(Math.max(analysis.confidence, lineCount >= 5 ? 0.72 : 0.62), completeness) };
   }
+
+  metrics.totalMs = now() - totalStarted;
+  input.onProgress?.("הפענוח המהיר הושלם", 1);
 
   return {
     ocrText,
     analysis,
     engine,
-    warning: visionAnalysis
-      ? `התמונה שוחזרה באמצעות Granite-Docling על ${visionBackend === "webgpu" ? "WebGPU" : "CPU/WASM"}. זהו מודל Vision ייעודי למסמכים; OCR רגיל אינו המנוע הראשי.`
-      : visionFailure
-        ? `מנוע המסמכים החכם לא הצליח (${visionFailure}). עברנו ל-OCR בסיסי רק כגיבוי, ולכן מומלץ להשתמש ב-ChatGPT אם המבנה אינו מדויק.`
-        : "הפענוח מתבצע כולו במכשיר ללא API בתשלום. בתרגילים מורכבים מומלץ לבדוק ולתקן את הזיהוי במסך הבא."
+    metrics,
+    warning: engine === "browser-paddleocr+local"
+      ? "הדף נקרא במסלול מהיר: PP-OCRv6 רץ ב-Worker נפרד ושומר את השורות והמיקומים. אם המבנה עדיין לא מספיק בטוח, TeacherSheet יעביר את אותה תמונה ל-ChatGPT של המורה במקום להחזיק את הטלפון דקות על מודל Vision כבד."
+      : "הפענוח מתבצע מקומית וללא API בתשלום. בתרגילים מורכבים מומלץ להשתמש ב-ChatGPT fallback כאשר הביטחון נמוך."
   };
 }
