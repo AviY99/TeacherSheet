@@ -11,7 +11,6 @@
   },
   "dependencies": {
     "@capacitor/core": "8.5.0",
-    "@huggingface/transformers": "4.2.0",
     "@paddleocr/paddleocr-js": "0.4.2",
     "mammoth": "1.12.2",
     "next": "16.3.3",
