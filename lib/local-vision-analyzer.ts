@@ -117,6 +117,9 @@ Return ONLY valid JSON in exactly this shape:
   ]
 }`;
 
+  const imageBytes = new Uint8Array(await input.image.arrayBuffer());
+  const mediaType = input.image.type || "image/jpeg";
+
   const result = streamText({
     model,
     messages: [
@@ -124,7 +127,7 @@ Return ONLY valid JSON in exactly this shape:
         role: "user",
         content: [
           { type: "text", text: prompt },
-          { type: "image", image: input.image }
+          { type: "image", image: imageBytes, mediaType }
         ]
       }
     ],
