@@ -1,6 +1,6 @@
 {
   "name": "teachersheet",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "engines": { "node": ">=22" },
   "scripts": {
@@ -9,7 +9,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@browser-ai/transformers-js": "3.0.2",
     "@capacitor/core": "8.5.0",
+    "@huggingface/transformers": "4.2.0",
+    "ai": "7.0.85",
     "mammoth": "1.12.2",
     "next": "16.3.3",
     "pdfjs-dist": "6.3.289",
