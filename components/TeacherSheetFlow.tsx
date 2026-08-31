@@ -2,7 +2,8 @@
 
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { RefObject } from "react";
-import type { AnalyzeResponse, ExerciseAnalysis, ExerciseType } from "@/lib/types";
+import { analyzeLocally } from "@/lib/local-analyzer";
+import type { ExerciseAnalysis, ExerciseType } from "@/lib/types";
 
 type Step = "source" | "preview" | "analyzing" | "decoded" | "draft";
 type SourceKind = "camera" | "image" | "pdf" | "word" | "text";
@@ -32,7 +33,7 @@ const sourceMeta: Record<Exclude<SourceKind, "text">, {
     subtitle: "צילום ישיר מהמצלמה",
     badge: "CAMERA",
     icon: "camera",
-    firstStep: "Google Document AI יקרא את הצילום והפריסה",
+    firstStep: "Tesseract OCR יקרא את הצילום ישירות במכשיר",
     hint: "מומלץ לצלם את כל הדף, ישר ובתאורה טובה"
   },
   image: {
@@ -40,7 +41,7 @@ const sourceMeta: Record<Exclude<SourceKind, "text">, {
     subtitle: "JPG · PNG · WEBP · TIFF",
     badge: "IMAGE",
     icon: "image",
-    firstStep: "Google Document AI יקרא את התמונה והפריסה",
+    firstStep: "Tesseract OCR יקרא את התמונה ישירות במכשיר",
     hint: "מתאים לצילום שכבר קיים בגלריה או במחשב"
   },
   pdf: {
@@ -48,15 +49,15 @@ const sourceMeta: Record<Exclude<SourceKind, "text">, {
     subtitle: "דף יחיד או מסמך PDF",
     badge: "PDF",
     icon: "pdf",
-    firstStep: "Google Document AI יקרא את הטקסט והפריסה ב-PDF",
-    hint: "מתאים לדפי עבודה סרוקים או PDF מקורי"
+    firstStep: "PDF.js יחלץ טקסט; PDF סרוק יעבור OCR מקומי",
+    hint: "ב-PDF סרוק ה-OCR המקומי מעבד עד שלושת העמודים הראשונים בגרסה זו"
   },
   word: {
     title: "Word",
     subtitle: "DOCX",
     badge: "WORD",
     icon: "word",
-    firstStep: "TeacherSheet יחלץ את הטקסט מקובץ ה-DOCX",
+    firstStep: "Mammoth יחלץ את הטקסט מקובץ ה-DOCX במכשיר",
     hint: "Word עובר חילוץ טקסט ישיר ואינו דורש OCR"
   }
 };
@@ -86,7 +87,7 @@ function SourceCard({ kind, onClick }: { kind: Exclude<SourceKind, "text">; onCl
       <FileIcon kind={meta.icon} />
       <b>{meta.title}</b>
       <small>{meta.subtitle}</small>
-      <span className="source-engine">{kind === "word" ? "DOCX → ChatGPT" : "Google AI → ChatGPT"}</span>
+      <span className="source-engine">{kind === "word" ? "DOCX → ניתוח מקומי" : kind === "pdf" ? "PDF.js/OCR → ניתוח מקומי" : "OCR מקומי → ניתוח מקומי"}</span>
     </button>
   );
 }
@@ -133,6 +134,8 @@ export function TeacherSheetFlow() {
   const [engine, setEngine] = useState("");
   const [warning, setWarning] = useState("");
   const [error, setError] = useState("");
+  const [analysisStatus, setAnalysisStatus] = useState("מכין את מנוע הפענוח המקומי...");
+  const [analysisProgress, setAnalysisProgress] = useState(0);
   const cameraRef = useRef<HTMLInputElement>(null);
   const imageRef = useRef<HTMLInputElement>(null);
   const pdfRef = useRef<HTMLInputElement>(null);
@@ -155,19 +158,23 @@ export function TeacherSheetFlow() {
     };
   }
 
-  async function runAnalysis() {
-    if (!file && !text.trim()) return;
+  async function runAnalysis(options?: { textOnly?: boolean }) {
+    const inputFile = options?.textOnly ? null : file;
+    if (!inputFile && !text.trim()) return;
     setStep("analyzing");
     setError("");
     setWarning("");
+    setAnalysisProgress(0);
+    setAnalysisStatus("מכין את מנוע הפענוח המקומי...");
     try {
-      const form = new FormData();
-      if (file) form.append("file", file);
-      if (text.trim()) form.append("text", text.trim());
-      const response = await fetch("/api/analyze", { method: "POST", body: form });
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.error || "Analysis failed");
-      const result = body as AnalyzeResponse;
+      const result = await analyzeLocally({
+        file: inputFile,
+        text: inputFile ? "" : text.trim(),
+        onProgress: (message, progress) => {
+          setAnalysisStatus(message);
+          if (typeof progress === "number") setAnalysisProgress(Math.max(0, Math.min(1, progress)));
+        }
+      });
       setOcrText(result.ocrText);
       setAnalysis(result.analysis);
       setEngine(result.engine);
@@ -175,7 +182,7 @@ export function TeacherSheetFlow() {
       setStep("decoded");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Analysis failed");
-      setStep(file ? "preview" : "source");
+      setStep(inputFile ? "preview" : "source");
     }
   }
 
@@ -183,7 +190,7 @@ export function TeacherSheetFlow() {
     if (!text.trim()) return;
     setSourceKind("text");
     setFile(null);
-    void runAnalysis();
+    void runAnalysis({ textOnly: true });
   }
 
   function reset() {
@@ -195,6 +202,7 @@ export function TeacherSheetFlow() {
     setAnalysis(initialAnalysis);
     setWarning("");
     setError("");
+    setAnalysisProgress(0);
   }
 
   const update = <K extends keyof ExerciseAnalysis>(key: K, value: ExerciseAnalysis[K]) => setAnalysis((a) => ({ ...a, [key]: value }));
@@ -204,8 +212,8 @@ export function TeacherSheetFlow() {
     <main className="app-shell">
       <header className="topbar">
         <div className="brand-mark">T</div>
-        <div><strong>TeacherSheet</strong><small>Exercise Structure V1</small></div>
-        <div className="scope-chip">שלב 1</div>
+        <div><strong>TeacherSheet</strong><small>Exercise Structure V1 · Free local engine</small></div>
+        <div className="scope-chip">ללא API בתשלום</div>
       </header>
 
       <section className="progress-row" aria-label="progress">
@@ -218,12 +226,12 @@ export function TeacherSheetFlow() {
 
       {step === "source" && (
         <section className="screen-card hero-screen">
-          <div className="eyebrow">CHOOSE INPUT SOURCE</div>
+          <div className="eyebrow">FREE · ON-DEVICE PROCESSING</div>
           <h1>איך תרצה להציג את דף התרגול?</h1>
-          <p>בחר את מקור הדוגמה. כל ארבעת המסלולים מגיעים לאותו מנגנון פענוח מבנה, אבל כל פורמט נקרא בדרך המתאימה לו.</p>
+          <p>כל הפענוח מתבצע במכשיר שלך. אין Google Document AI, אין OpenAI API, אין מפתחות ואין חיוב לפי שימוש.</p>
 
           <div className="input-route-note">
-            <strong>4 מסלולי קלט מלאים</strong>
+            <strong>4 מסלולי קלט מקומיים</strong>
             <span>מצלמה · תמונה · PDF · Word</span>
           </div>
 
@@ -246,7 +254,7 @@ export function TeacherSheetFlow() {
           <div className="or"><span>או הדבק טקסט לצורכי בדיקת הפענוח</span></div>
           <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="הדבק כאן טקסט של תרגיל..." />
           {error && <div className="error-box">{error}</div>}
-          <button className="primary" disabled={!text.trim()} onClick={analyzeText}>פענח טקסט</button>
+          <button className="primary" disabled={!text.trim()} onClick={analyzeText}>פענח טקסט מקומית</button>
         </section>
       )}
 
@@ -255,7 +263,7 @@ export function TeacherSheetFlow() {
           <button className="back" onClick={() => setStep("source")}>→ חזרה</button>
           <div className="screen-heading">
             <div><div className="eyebrow">SOURCE PREVIEW · {selectedMeta.badge}</div><h1>{selectedMeta.title} נקלט</h1></div>
-            <span className="status-dot">מוכן לפענוח</span>
+            <span className="status-dot">מוכן לפענוח מקומי</span>
           </div>
           <div className="preview-layout">
             <div className="file-preview">
@@ -266,24 +274,25 @@ export function TeacherSheetFlow() {
               <label>קובץ</label><strong>{file.name}</strong><small>{(file.size / 1024 / 1024).toFixed(2)} MB</small>
               <div className="source-hint">{selectedMeta.hint}</div>
               <div className="pipeline-box">
-                <b>מסלול הפענוח</b>
+                <b>מסלול הפענוח — ללא שירות בתשלום</b>
                 <span>1. {selectedMeta.firstStep}</span>
-                <span>2. ChatGPT יזהה את סוג ומבנה התרגיל</span>
+                <span>2. TeacherSheet יזהה את סוג ומבנה התרגיל באמצעות כללים מקומיים</span>
                 <span>3. יוצג פענוח לעריכה לפני יצירת טיוטה</span>
               </div>
             </div>
           </div>
           {error && <div className="error-box">{error}</div>}
-          <button className="primary" onClick={runAnalysis}>פענח את סוג התרגיל</button>
+          <button className="primary" onClick={() => void runAnalysis()}>פענח את סוג התרגיל</button>
         </section>
       )}
 
       {step === "analyzing" && (
         <section className="screen-card analyzing">
           <div className="scan-sheet"><div className="scan-line" /></div>
-          <h1>מפענח את דף התרגול</h1>
-          <p>{sourceKind === "word" ? "מחלץ את תוכן מסמך ה-Word ומזהה את מבנה התרגיל." : sourceKind === "text" ? "מנתח את טקסט התרגיל ומזהה את המבנה שלו." : "קורא טקסט, מיקום ופריסה — ואז מזהה את סוג התרגיל והמבנה שלו."}</p>
-          <div className="analysis-steps"><span className="done">✓ קליטת מקור</span><span className="working">● ניתוח מבנה</span><span>○ יצירת מודל תרגיל</span></div>
+          <h1>מפענח את דף התרגול במכשיר</h1>
+          <p>{analysisStatus}</p>
+          <div className="local-progress" aria-label="OCR progress"><span style={{ width: `${Math.round(analysisProgress * 100)}%` }} /></div>
+          <div className="analysis-steps"><span className="done">✓ קליטת מקור</span><span className="working">● OCR / ניתוח מקומי</span><span>○ יצירת מודל תרגיל</span></div>
         </section>
       )}
 
