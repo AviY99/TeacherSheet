@@ -74,7 +74,7 @@ async function recognizeSources(sources: OcrSource[], onProgress?: ProgressCallb
   const worker = await createWorker("eng", 1, {
     logger: (message: { status?: string; progress?: number }) => {
       if (!message.status) return;
-      onProgress?.(`OCR עזר: ${message.status}`, typeof message.progress === "number" ? message.progress * 0.58 : undefined);
+      onProgress?.(`OCR fallback: ${message.status}`, typeof message.progress === "number" ? message.progress * 0.7 : undefined);
     }
   });
 
@@ -82,7 +82,7 @@ async function recognizeSources(sources: OcrSource[], onProgress?: ProgressCallb
   const blocks: DocumentLayoutBlock[] = [];
   try {
     for (let index = 0; index < sources.length; index += 1) {
-      onProgress?.(`קורא טקסט עזר מעמוד ${index + 1} מתוך ${sources.length}`, 0.05 + index / Math.max(1, sources.length) * 0.45);
+      onProgress?.(`OCR fallback: עמוד ${index + 1} מתוך ${sources.length}`, 0.08 + index / Math.max(1, sources.length) * 0.5);
       const result: any = await worker.recognize(
         sources[index],
         { rotateAuto: true },
@@ -172,22 +172,26 @@ export async function analyzeLocally(input: {
       layout = result.blocks;
       engine = result.engine;
     } else if (file.type.startsWith("image/")) {
-      input.onProgress?.("שלב 1/2: קורא טקסט עזר מהתמונה", 0.04);
-      const result = await recognizeSources([file], input.onProgress);
-      ocrText = result.text;
-      layout = result.blocks;
-
       if (localVisionSupported()) {
         try {
-          input.onProgress?.("שלב 2/2: הבינה החזותית קוראת את הדף עצמו", 0.65);
-          visionAnalysis = await analyzeWithLocalVision({ image: file, ocrText, onProgress: input.onProgress });
-          engine = "browser-ocr+vision-local";
+          input.onProgress?.("מפעיל בינה חזותית ייעודית למסמכים", 0.04);
+          const vision = await analyzeWithLocalVision({ image: file, onProgress: input.onProgress });
+          visionAnalysis = vision.analysis;
+          ocrText = vision.documentText;
+          layout = vision.layout;
+          engine = "browser-docling+local";
         } catch (error) {
-          visionFailure = error instanceof Error ? error.message : "Local vision failed";
-          engine = "browser-ocr+local";
+          visionFailure = error instanceof Error ? error.message : "Document vision failed";
         }
       } else {
         visionFailure = "WebGPU is unavailable on this browser/device.";
+      }
+
+      if (!visionAnalysis) {
+        input.onProgress?.("מנוע המסמכים לא הצליח — עובר ל-OCR בסיסי כגיבוי", 0.08);
+        const result = await recognizeSources([file], input.onProgress);
+        ocrText = result.text;
+        layout = result.blocks;
         engine = "browser-ocr+local";
       }
     } else {
@@ -200,7 +204,7 @@ export async function analyzeLocally(input: {
 
   let analysis = visionAnalysis || fallbackAnalyze(ocrText, layout);
   if (!visionAnalysis && input.file?.type.startsWith("image/")) {
-    analysis = { ...analysis, confidence: Math.min(analysis.confidence, 0.68) };
+    analysis = { ...analysis, confidence: Math.min(analysis.confidence, 0.62) };
   }
 
   return {
@@ -208,9 +212,9 @@ export async function analyzeLocally(input: {
     analysis,
     engine,
     warning: visionAnalysis
-      ? "הפענוח בוצע באמצעות מודל Vision מקומי שרואה את התמונה עצמה; OCR משמש רק כמידע עזר."
+      ? "התמונה שוחזרה באמצעות Granite-Docling, מודל Vision ייעודי למסמכים. הוא קורא טקסט ומבנה עמוד ישירות מהתמונה; OCR רגיל אינו המנוע הראשי."
       : visionFailure
-        ? `מנוע ה-Vision המקומי לא היה זמין (${visionFailure}). השתמשנו בזיהוי המקומי הבסיסי ולכן מומלץ להעביר ל-ChatGPT אם המבנה אינו מדויק.`
+        ? `מנוע המסמכים החכם לא הצליח (${visionFailure}). עברנו ל-OCR בסיסי רק כגיבוי, ולכן מומלץ להשתמש ב-ChatGPT אם המבנה אינו מדויק.`
         : "הפענוח מתבצע כולו במכשיר ללא API בתשלום. בתרגילים מורכבים מומלץ לבדוק ולתקן את הזיהוי במסך הבא."
   };
 }
