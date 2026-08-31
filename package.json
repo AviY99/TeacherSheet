@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:compat": "playwright test"
   },
   "dependencies": {
     "@capacitor/core": "8.5.0",
@@ -21,6 +22,7 @@
   "devDependencies": {
     "@capacitor/android": "8.5.0",
     "@capacitor/cli": "8.5.0",
+    "@playwright/test": "^1.55.0",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
