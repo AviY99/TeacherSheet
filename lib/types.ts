@@ -40,6 +40,8 @@ export interface DocumentLayoutBlock {
 }
 
 export type LocalAnalysisEngine =
+  | "browser-docling-webgpu+local"
+  | "browser-docling-wasm+local"
   | "browser-docling+local"
   | "browser-ocr+vision-local"
   | "browser-ocr+local"
