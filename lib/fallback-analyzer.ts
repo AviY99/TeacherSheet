@@ -202,16 +202,33 @@ function extractTitle(lines: PhysicalLine[], type: ExerciseType) {
   return candidate?.text || defaults[type].title;
 }
 
-function extractInstructions(lines: PhysicalLine[], type: ExerciseType) {
-  const imperative = /\b(fill|complete|choose|circle|select|match|mark|write|read|translate|use|unscramble|rearrange)\b/i;
-  const index = lines.findIndex((line) => numberedValue(line.text) === null && line.text.length >= 10 && line.text.length <= 220 && imperative.test(line.text));
-  if (index < 0) return defaults[type].instructions;
-  const first = lines[index].text;
+function extractInstructions(lines: PhysicalLine[], type: ExerciseType, title: string) {
+  const startsLikeInstruction = /^\s*(fill|complete|choose|circle|select|match|mark|write|read|translate|use|unscramble|rearrange)\b/i;
+  const titleNorm = title.replace(/\s+/g, " ").trim().toLowerCase();
+  const candidates = lines.filter((line) => {
+    const normalized = line.text.replace(/\s+/g, " ").trim();
+    return numberedValue(normalized) === null
+      && normalized.length >= 10
+      && normalized.length <= 220
+      && normalized.toLowerCase() !== titleNorm
+      && startsLikeInstruction.test(normalized);
+  });
+  const firstLine = candidates[0];
+  if (!firstLine) return defaults[type].instructions;
+
+  const index = lines.indexOf(firstLine);
   const next = lines[index + 1];
-  if (next && numberedValue(next.text) === null && next.text.length < 80 && next.y - lines[index].y < 0.055 && !imperative.test(next.text)) {
-    return `${first} ${next.text}`.replace(/\s+/g, " ").trim();
+  if (next) {
+    const nextNorm = next.text.replace(/\s+/g, " ").trim();
+    if (numberedValue(nextNorm) === null
+      && nextNorm.length < 100
+      && next.y - firstLine.y < 0.055
+      && nextNorm.toLowerCase() !== titleNorm
+      && !startsLikeInstruction.test(nextNorm)) {
+      return `${firstLine.text} ${nextNorm}`.replace(/\s+/g, " ").trim();
+    }
   }
-  return first;
+  return firstLine.text;
 }
 
 function countQuestions(numberedLines: PhysicalLine[], candidateLines: PhysicalLine[]) {
@@ -263,10 +280,11 @@ export function fallbackAnalyze(text: string, layout: DocumentLayoutBlock[] = []
   if (questionCount >= 3 && coverage < 0.65) confidence = Math.min(confidence, 0.64);
 
   const config = defaults[type];
+  const title = extractTitle(physicalLines, type);
   return {
     exerciseType: type,
-    title: extractTitle(physicalLines, type),
-    instructions: extractInstructions(physicalLines, type),
+    title,
+    instructions: extractInstructions(physicalLines, type, title),
     questionCount,
     answerFormat: config.format,
     hasWordBank,
