@@ -182,7 +182,7 @@ function cleanBankTerm(value: string) {
   return cleaned;
 }
 
-function splitBankLine(text: string) {
+function splitBankText(text: string) {
   const withoutLabel = text.replace(WORD_BANK_LABEL, " ").replace(/\s+/g, " ").trim();
   const hasStrongSeparator = /[,;|•·]/.test(withoutLabel) || /_{3,}/.test(withoutLabel);
   if (!hasStrongSeparator) return [] as string[];
@@ -192,10 +192,25 @@ function splitBankLine(text: string) {
     .filter(Boolean);
 }
 
+function groupBankCandidates(candidates: PhysicalLine[]) {
+  const groups: PhysicalLine[][] = [];
+  for (const line of [...candidates].sort((a, b) => a.page - b.page || a.y - b.y)) {
+    const current = groups[groups.length - 1];
+    const previous = current?.[current.length - 1];
+    const labelBridge = Boolean(previous && (WORD_BANK_LABEL.test(previous.text) || WORD_BANK_LABEL.test(line.text)));
+    const maxGap = labelBridge ? 0.24 : Math.max(0.055, ((previous?.height || line.height) + line.height) * 2.2);
+    if (current && previous && previous.page === line.page && line.y - previous.y <= maxGap) current.push(line);
+    else groups.push([line]);
+  }
+  return groups;
+}
+
 function detectWordBank(lines: PhysicalLine[], questionLines: PhysicalLine[]) {
   const labelLines = lines.filter((line) => WORD_BANK_LABEL.test(line.text));
+  const firstQuestionByPage = new Map<number, number>();
   const lastQuestionByPage = new Map<number, number>();
   for (const line of questionLines) {
+    firstQuestionByPage.set(line.page, Math.min(firstQuestionByPage.get(line.page) ?? 1, line.y));
     lastQuestionByPage.set(line.page, Math.max(lastQuestionByPage.get(line.page) || 0, line.y));
   }
 
@@ -203,26 +218,44 @@ function detectWordBank(lines: PhysicalLine[], questionLines: PhysicalLine[]) {
     if (numberedValue(line.text) !== null || FOOTER_LIKE.test(line.text)) return false;
     if (WORD_BANK_LABEL.test(line.text) || looksLikeWordList(line)) return true;
 
-    const afterQuestion = line.y > (lastQuestionByPage.get(line.page) || 1) && line.y - (lastQuestionByPage.get(line.page) || 1) < 0.28;
-    const nearLabel = labelLines.some((label) => label.page === line.page && line.y >= label.y && line.y - label.y < 0.22);
+    const lastQuestion = lastQuestionByPage.get(line.page);
+    const firstQuestion = firstQuestionByPage.get(line.page);
+    const afterQuestion = lastQuestion !== undefined && line.y > lastQuestion && line.y - lastQuestion < 0.30;
+    const beforeQuestion = firstQuestion !== undefined && line.y < firstQuestion && firstQuestion - line.y < 0.24;
+    const nearLabel = labelLines.some((label) => label.page === line.page && Math.abs(line.y - label.y) < 0.24);
     const separators = (line.text.match(/[,;|•·]/g) || []).length;
-    return (afterQuestion || nearLabel) && separators >= 2 && lexicalItems(line.text).length >= 4;
+    return (afterQuestion || beforeQuestion || nearLabel) && separators >= 2 && lexicalItems(line.text).length >= 4;
   });
 
+  const regions = groupBankCandidates(candidates).map((group) => {
+    const text = group.map((line) => line.text).join(" ");
+    const words = splitBankText(text);
+    const page = group[0]?.page || 1;
+    const firstY = Math.min(...group.map((line) => line.y));
+    const lastY = Math.max(...group.map((line) => line.y));
+    const firstQuestion = firstQuestionByPage.get(page);
+    const lastQuestion = lastQuestionByPage.get(page);
+    let score = Math.min(words.length, 14);
+    if (group.some((line) => WORD_BANK_LABEL.test(line.text))) score += 8;
+    if (group.some(looksLikeWordList)) score += 4;
+    if (lastQuestion !== undefined && firstY >= lastQuestion && firstY - lastQuestion < 0.30) score += 6 - (firstY - lastQuestion) * 10;
+    if (firstQuestion !== undefined && lastY <= firstQuestion && firstQuestion - lastY < 0.24) score += 4 - (firstQuestion - lastY) * 8;
+    return { group, words, score };
+  }).sort((a, b) => b.score - a.score || b.words.length - a.words.length);
+
+  const best = regions[0];
   const words: string[] = [];
   const seen = new Set<string>();
-  for (const line of candidates) {
-    for (const item of splitBankLine(line.text)) {
-      const key = item.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      words.push(item);
-      if (words.length >= 50) break;
-    }
+  for (const item of best?.words || []) {
+    const key = item.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    words.push(item);
     if (words.length >= 50) break;
   }
 
-  const explicit = labelLines.length > 0 || lines.some(looksLikeWordList);
+  const relevantLabel = Boolean(best?.group.some((line) => WORD_BANK_LABEL.test(line.text)));
+  const explicit = relevantLabel || Boolean(best?.group.some(looksLikeWordList));
   return {
     hasWordBank: explicit || words.length >= 4,
     words,
