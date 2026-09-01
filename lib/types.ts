@@ -25,6 +25,8 @@ export interface ExerciseAnalysis {
   questionCount: number;
   answerFormat: AnswerFormat;
   hasWordBank: boolean;
+  /** Terms copied from a word bank that was actually recognized in the source. */
+  wordBankWords?: string[];
   confidence: number;
   layoutNotes: string[];
   questions: QuestionPattern[];
