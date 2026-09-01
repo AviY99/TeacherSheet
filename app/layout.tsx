@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import "./input-sources.css";
+import "./worksheet-ux.css";
 import { ServiceWorkerRegister } from "@/components/ServiceWorkerRegister";
 import { FilePickerGuard } from "@/components/FilePickerGuard";
 
