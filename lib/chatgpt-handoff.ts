@@ -31,6 +31,11 @@ function normalizeAnalysis(value: unknown): ExerciseAnalysis {
   const answerFormat = String(row.answerFormat || "open") as AnswerFormat;
   const rawQuestions = Array.isArray(row.questions) ? row.questions : [];
   const rawNotes = Array.isArray(row.layoutNotes) ? row.layoutNotes : [];
+  const rawBank = Array.isArray(row.wordBankWords) ? row.wordBankWords : [];
+  const wordBankWords = rawBank
+    .slice(0, 50)
+    .map((item) => String(item).replace(/\s+/g, " ").trim().slice(0, 60))
+    .filter(Boolean);
 
   return {
     exerciseType: allowedTypes.has(exerciseType) ? exerciseType : "custom",
@@ -38,7 +43,8 @@ function normalizeAnalysis(value: unknown): ExerciseAnalysis {
     instructions: String(row.instructions || "Complete the exercise.").slice(0, 500),
     questionCount: clamp(Math.round(Number(row.questionCount) || rawQuestions.length || 8), 1, 30),
     answerFormat: allowedFormats.has(answerFormat) ? answerFormat : "open",
-    hasWordBank: Boolean(row.hasWordBank),
+    hasWordBank: Boolean(row.hasWordBank) || wordBankWords.length > 0,
+    wordBankWords,
     confidence: clamp(Number(row.confidence) || 0.9, 0, 1),
     layoutNotes: rawNotes.slice(0, 8).map((item) => String(item).slice(0, 250)),
     questions: rawQuestions.slice(0, 30).map((item, index) => {
@@ -66,6 +72,7 @@ function structureLooksConsistent(analysis: ExerciseAnalysis) {
     if (analysis.questions.length >= 3 && questionsWithBlanks < Math.ceil(analysis.questions.length * 0.5)) return false;
   }
 
+  if (analysis.hasWordBank && (analysis.wordBankWords?.length || 0) < 3) return false;
   return true;
 }
 
@@ -104,7 +111,7 @@ IMPORTANT SCOPE:
 - Do NOT generate an answer key.
 - Do NOT generate the final worksheet.
 - Preserve question wording only as a structural reference.
-- Detect whether a word bank exists only as a structural boolean.
+- If a word bank exists, copy ONLY the terms visibly present in that source word bank. Never invent or complete missing terms.
 
 TeacherSheet handoff ID: ${id}
 Input type: ${input.sourceKind || "unknown"}
@@ -125,6 +132,7 @@ TEACHERSHEET_RETURN_V1
   "questionCount": 1,
   "answerFormat": "blank|choice|matching|true_false|open",
   "hasWordBank": false,
+  "wordBankWords": ["only terms copied from the visible source bank"],
   "confidence": 0.95,
   "layoutNotes": ["short structural observations"],
   "questions": [
