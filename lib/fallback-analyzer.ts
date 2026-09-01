@@ -12,6 +12,13 @@ const defaults: Record<ExerciseType, { title: string; instructions: string; form
   custom: { title: "English practice", instructions: "Complete the exercise.", format: "open" }
 };
 
+const WORD_BANK_LABEL = /\bword\s*(?:bank|box|list)\b|\bwords?\s+(?:in|from)\s+(?:the\s+)?(?:box|list|bank)\b|\buse\s+(?:the\s+)?words?\b|\bwords?\s+below\b|\bfrom\s+the\s+list\s+provided\b|מחסן\s*מילים|אוצר\s*מילים|מאגר\s*מילים/i;
+const FOOTER_LIKE = /https?:\/\/|www\.|\.com\b|\.co\.\w+\b|copyright|all rights|free english|worksheets? visit|name\s*:|date\s*:/i;
+const BANK_STOP_WORDS = new Set([
+  "word", "words", "bank", "box", "list", "use", "choose", "correct", "from", "provided",
+  "complete", "sentence", "sentences", "answer", "example", "name", "date"
+]);
+
 interface PhysicalLine {
   page: number;
   y: number;
@@ -97,9 +104,10 @@ function reconstructPhysicalLines(layout: DocumentLayoutBlock[]): PhysicalLine[]
 }
 
 function textLines(text: string): PhysicalLine[] {
-  return text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line, index) => ({
+  const raw = text.split(/\r?\n/);
+  return raw.map((line) => line.trim()).filter(Boolean).map((line, index) => ({
     page: 1,
-    y: index / Math.max(1, text.split(/\r?\n/).length),
+    y: index / Math.max(1, raw.length),
     x: 0,
     right: 1,
     height: 0.02,
@@ -121,15 +129,105 @@ function numberedValue(text: string) {
   return match ? Number(match[1]) : null;
 }
 
-function looksLikeWordList(line: PhysicalLine) {
-  const commaCount = (line.text.match(/,/g) || []).length;
-  const words = line.text.split(/[\s,;]+/).filter(Boolean);
-  return line.y > 0.5 && commaCount >= 3 && words.length >= 6 && numberedValue(line.text) === null;
+function selectQuestionSequence(lines: PhysicalLine[]) {
+  const numbered = lines.filter((line) => numberedValue(line.text) !== null);
+  if (numbered.length < 2) return numbered;
+
+  const runs: PhysicalLine[][] = [];
+  let current: PhysicalLine[] = [];
+  for (const line of numbered) {
+    const value = numberedValue(line.text)!;
+    const previous = current.length ? numberedValue(current[current.length - 1].text)! : null;
+    const samePage = !current.length || current[current.length - 1].page === line.page;
+
+    if (value === 1) {
+      if (current.length) runs.push(current);
+      current = [line];
+    } else if (current.length && samePage && previous !== null && value === previous + 1) {
+      current.push(line);
+    } else if (!current.length) {
+      current = [line];
+    } else {
+      runs.push(current);
+      current = value === 1 ? [line] : [];
+    }
+  }
+  if (current.length) runs.push(current);
+
+  const sequential = runs.filter((run) => numberedValue(run[0].text) === 1);
+  const candidates = sequential.length ? sequential : runs;
+  return candidates.sort((a, b) => b.length - a.length || a[0].y - b[0].y)[0] || numbered;
 }
 
-function detectWordBank(lines: PhysicalLine[], low: string) {
-  return /word bank|word list|words in (?:the )?(?:box|list)|use the words|words below|from the list provided/.test(low)
-    || lines.some(looksLikeWordList);
+function lexicalItems(text: string) {
+  return text.split(/[\s,;|•·]+/).map((value) => value.trim()).filter(Boolean);
+}
+
+function looksLikeWordList(line: PhysicalLine) {
+  const separators = (line.text.match(/[,;|•·]/g) || []).length;
+  const words = lexicalItems(line.text);
+  return separators >= 3 && words.length >= 5 && numberedValue(line.text) === null && !FOOTER_LIKE.test(line.text);
+}
+
+function cleanBankTerm(value: string) {
+  const cleaned = value
+    .replace(WORD_BANK_LABEL, "")
+    .replace(/^[\s\-–—:;,.•·|()[\]{}]+|[\s\-–—:;,.•·|()[\]{}]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned || cleaned.length > 42 || /\d/.test(cleaned) || FOOTER_LIKE.test(cleaned)) return "";
+  if (!/^[A-Za-z][A-Za-z'’-]*(?:\s+[A-Za-z][A-Za-z'’-]*){0,3}$/.test(cleaned)) return "";
+  const low = cleaned.toLowerCase();
+  if (BANK_STOP_WORDS.has(low)) return "";
+  return cleaned;
+}
+
+function splitBankLine(text: string) {
+  const withoutLabel = text.replace(WORD_BANK_LABEL, " ").replace(/\s+/g, " ").trim();
+  const hasStrongSeparator = /[,;|•·]/.test(withoutLabel) || /_{3,}/.test(withoutLabel);
+  if (!hasStrongSeparator) return [] as string[];
+  return withoutLabel
+    .split(/\s*(?:[,;|•·]|_{3,})\s*/)
+    .map(cleanBankTerm)
+    .filter(Boolean);
+}
+
+function detectWordBank(lines: PhysicalLine[], questionLines: PhysicalLine[]) {
+  const labelLines = lines.filter((line) => WORD_BANK_LABEL.test(line.text));
+  const lastQuestionByPage = new Map<number, number>();
+  for (const line of questionLines) {
+    lastQuestionByPage.set(line.page, Math.max(lastQuestionByPage.get(line.page) || 0, line.y));
+  }
+
+  const candidates = lines.filter((line) => {
+    if (numberedValue(line.text) !== null || FOOTER_LIKE.test(line.text)) return false;
+    if (WORD_BANK_LABEL.test(line.text) || looksLikeWordList(line)) return true;
+
+    const afterQuestion = line.y > (lastQuestionByPage.get(line.page) || 1) && line.y - (lastQuestionByPage.get(line.page) || 1) < 0.28;
+    const nearLabel = labelLines.some((label) => label.page === line.page && line.y >= label.y && line.y - label.y < 0.22);
+    const separators = (line.text.match(/[,;|•·]/g) || []).length;
+    return (afterQuestion || nearLabel) && separators >= 2 && lexicalItems(line.text).length >= 4;
+  });
+
+  const words: string[] = [];
+  const seen = new Set<string>();
+  for (const line of candidates) {
+    for (const item of splitBankLine(line.text)) {
+      const key = item.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      words.push(item);
+      if (words.length >= 50) break;
+    }
+    if (words.length >= 50) break;
+  }
+
+  const explicit = labelLines.length > 0 || lines.some(looksLikeWordList);
+  return {
+    hasWordBank: explicit || words.length >= 4,
+    words,
+    explicit
+  };
 }
 
 function chooseType(input: {
@@ -185,13 +283,13 @@ function chooseType(input: {
   };
 }
 
-function detectLayoutNotes(lines: PhysicalLine[], originalBlockCount: number, hasWordBank: boolean) {
+function detectLayoutNotes(lines: PhysicalLine[], originalBlockCount: number, hasWordBank: boolean, wordCount: number) {
   if (!lines.length) return ["Text-only local analysis; no reliable page coordinates were available."];
   const notes: string[] = [];
   const left = lines.filter((line) => line.x < 0.42 && line.right < 0.62).length;
   const right = lines.filter((line) => line.x > 0.48).length;
   if (left >= 3 && right >= 3) notes.push("The page contains multiple horizontal regions or columns.");
-  if (hasWordBank) notes.push("A word-list / word-bank region was detected from text or page geometry.");
+  if (hasWordBank) notes.push(wordCount ? `A word-bank region with ${wordCount} readable terms was detected.` : "A word-bank region was detected, but its terms were not read reliably.");
   notes.push(`OCR regions were reconstructed into ${lines.length} physical lines from ${originalBlockCount || lines.length} detected regions.`);
   return notes.slice(0, 4);
 }
@@ -232,11 +330,7 @@ function extractInstructions(lines: PhysicalLine[], type: ExerciseType, title: s
 }
 
 function countQuestions(numberedLines: PhysicalLine[], candidateLines: PhysicalLine[]) {
-  if (numberedLines.length) {
-    const numbers = numberedLines.map((line) => numberedValue(line.text)).filter((value): value is number => value !== null);
-    const unique = [...new Set(numbers)];
-    return clamp(unique.length, 1, 30);
-  }
+  if (numberedLines.length) return clamp(numberedLines.length, 1, 30);
   return clamp(candidateLines.length || 8, 1, 30);
 }
 
@@ -245,9 +339,9 @@ export function fallbackAnalyze(text: string, layout: DocumentLayoutBlock[] = []
   const reconstructedText = physicalLines.map((line) => line.text).join("\n");
   const semanticText = `${text}\n${reconstructedText}`;
   const low = semanticText.toLowerCase();
-  const numberedLines = physicalLines.filter((line) => numberedValue(line.text) !== null);
-  const hasWordBank = detectWordBank(physicalLines, low);
-  const typeDecision = chooseType({ text: semanticText, lines: physicalLines, numberedLines, hasWordBank });
+  const numberedLines = selectQuestionSequence(physicalLines);
+  const bank = detectWordBank(physicalLines, numberedLines);
+  const typeDecision = chooseType({ text: semanticText, lines: physicalLines, numberedLines, hasWordBank: bank.hasWordBank });
   const type = typeDecision.type;
 
   const candidateLines = numberedLines.length
@@ -278,6 +372,7 @@ export function fallbackAnalyze(text: string, layout: DocumentLayoutBlock[] = []
     confidence = Math.min(confidence, 0.58);
   }
   if (questionCount >= 3 && coverage < 0.65) confidence = Math.min(confidence, 0.64);
+  if (bank.hasWordBank && bank.words.length < 3) confidence = Math.min(confidence, 0.72);
 
   const config = defaults[type];
   const title = extractTitle(physicalLines, type);
@@ -287,9 +382,10 @@ export function fallbackAnalyze(text: string, layout: DocumentLayoutBlock[] = []
     instructions: extractInstructions(physicalLines, type, title),
     questionCount,
     answerFormat: config.format,
-    hasWordBank,
+    hasWordBank: bank.hasWordBank,
+    wordBankWords: bank.words,
     confidence: clamp(confidence, 0.2, 0.92),
-    layoutNotes: detectLayoutNotes(physicalLines, layout.length, hasWordBank),
+    layoutNotes: detectLayoutNotes(physicalLines, layout.length, bank.hasWordBank, bank.words.length),
     questions
   };
 }
