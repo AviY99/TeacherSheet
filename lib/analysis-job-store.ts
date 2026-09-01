@@ -6,6 +6,7 @@ const DB_NAME = "teachersheet-local-jobs";
 const DB_VERSION = 1;
 const STORE = "jobs";
 const ACTIVE_KEY = "active";
+const MAX_RESUME_AGE_MS = 30 * 60 * 1000;
 
 export interface SavedAnalysisJob {
   key: typeof ACTIVE_KEY;
@@ -51,14 +52,34 @@ async function withStore<T>(mode: IDBTransactionMode, action: (store: IDBObjectS
 
 export async function saveActiveAnalysisJob(job: Omit<SavedAnalysisJob, "key" | "updatedAt"> & { updatedAt?: number }) {
   if (typeof indexedDB === "undefined") return;
-  await withStore("readwrite", (store) => store.put({ ...job, key: ACTIVE_KEY, updatedAt: job.updatedAt || Date.now() } as SavedAnalysisJob));
+
+  // Persistence is only for an analysis that may need to resume. A completed
+  // result must never become the application's next start screen.
+  if (job.status === "completed") {
+    await clearActiveAnalysisJob();
+    return;
+  }
+
+  await withStore("readwrite", (store) => store.put({
+    ...job,
+    key: ACTIVE_KEY,
+    updatedAt: job.updatedAt || Date.now()
+  } as SavedAnalysisJob));
 }
 
 export async function loadActiveAnalysisJob(): Promise<SavedAnalysisJob | null> {
   if (typeof indexedDB === "undefined") return null;
   try {
     const value = await withStore<SavedAnalysisJob | undefined>("readonly", (store) => store.get(ACTIVE_KEY));
-    return value || null;
+    if (!value) return null;
+
+    const tooOld = Date.now() - value.updatedAt > MAX_RESUME_AGE_MS;
+    if (value.status === "completed" || tooOld) {
+      await clearActiveAnalysisJob();
+      return null;
+    }
+
+    return value;
   } catch {
     return null;
   }
