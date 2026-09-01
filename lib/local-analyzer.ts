@@ -133,7 +133,7 @@ async function recognizeSources(sources: OcrSource[], onProgress?: ProgressCallb
   });
 
   const elapsed = now() - started;
-  onProgress?.(`נקראו ${blocks.length} שורות/אזורים — בונה מבנה`, 0.78);
+  onProgress?.(`נקראו ${blocks.length} אזורי טקסט — משחזר שורות ומבנה`, 0.78);
   return {
     text: texts.filter(Boolean).join("\n\n").trim(),
     blocks: blocks.slice(0, 320),
@@ -198,6 +198,21 @@ async function analyzePdf(file: File, onProgress?: ProgressCallback) {
   return { ...ocr, engine: "pdf-ocr+local" as const };
 }
 
+function applyConsistencyConfidence(analysis: AnalyzeResponse["analysis"]) {
+  let confidence = analysis.confidence;
+  const coverage = analysis.questionCount > 0 ? analysis.questions.length / analysis.questionCount : 0;
+  if (analysis.questionCount >= 3 && coverage < 0.75) confidence = Math.min(confidence, 0.64);
+  if (analysis.exerciseType === "multiple_choice") {
+    const withOptions = analysis.questions.filter((question) => question.optionCount >= 2).length;
+    if (withOptions < Math.max(1, Math.ceil(analysis.questions.length * 0.5))) confidence = Math.min(confidence, 0.58);
+  }
+  if (analysis.exerciseType === "fill_in_the_blanks") {
+    const withBlanks = analysis.questions.filter((question) => question.blankCount > 0).length;
+    if (analysis.questions.length >= 3 && withBlanks < Math.ceil(analysis.questions.length * 0.5)) confidence = Math.min(confidence, 0.62);
+  }
+  return { ...analysis, confidence };
+}
+
 export async function analyzeLocally(input: {
   file?: File | null;
   text?: string;
@@ -254,17 +269,10 @@ export async function analyzeLocally(input: {
 
   if (!ocrText) throw new Error("לא נמצא טקסט קריא במקור שהועלה.");
 
-  input.onProgress?.("מזהה את סוג התרגיל ומסדר את השורות", 0.88);
+  input.onProgress?.("משחזר שורות פיזיות ומזהה יחידות תרגיל", 0.88);
   const structureStarted = now();
-  let analysis = fallbackAnalyze(ocrText, layout);
+  const analysis = applyConsistencyConfidence(fallbackAnalyze(ocrText, layout));
   metrics.structureMs = now() - structureStarted;
-
-  if (input.file?.type.startsWith("image/")) {
-    const lineCount = layout.length || ocrText.split(/\n/).filter(Boolean).length;
-    const completeness = lineCount >= Math.max(3, analysis.questionCount) ? 0.78 : 0.68;
-    analysis = { ...analysis, confidence: Math.min(Math.max(analysis.confidence, lineCount >= 5 ? 0.72 : 0.62), completeness) };
-  }
-
   metrics.totalMs = now() - totalStarted;
   input.onProgress?.("הפענוח המהיר הושלם", 1);
 
@@ -274,7 +282,7 @@ export async function analyzeLocally(input: {
     engine,
     metrics,
     warning: engine === "browser-paddleocr+local"
-      ? "הדף נקרא במסלול מהיר: PP-OCRv6 רץ ב-Worker נפרד ושומר את השורות והמיקומים. אם המבנה עדיין לא מספיק בטוח, TeacherSheet יעביר את אותה תמונה ל-ChatGPT של המורה במקום להחזיק את הטלפון דקות על מודל Vision כבד."
-      : "הפענוח מתבצע מקומית וללא API בתשלום. בתרגילים מורכבים מומלץ להשתמש ב-ChatGPT fallback כאשר הביטחון נמוך."
+      ? "הדף נקרא במסלול מהיר ב-Worker. TeacherSheet משחזר שורות לפי מיקום ומעלה ביטחון רק כאשר סוג התרגיל, מספר הפריטים והמבנה מסכימים. אם הראיות אינן מספיקות, יוצע ChatGPT fallback במקום לנחש."
+      : "הפענוח מתבצע מקומית וללא API בתשלום. בתרגילים מורכבים TeacherSheet יעדיף ChatGPT fallback על פני ניחוש ברמת ביטחון נמוכה."
   };
 }
