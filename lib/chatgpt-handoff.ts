@@ -1,6 +1,6 @@
 import type { AnswerFormat, ExerciseAnalysis, ExerciseType } from "./types";
 
-export const CHATGPT_REVIEW_THRESHOLD = 0.72;
+export const CHATGPT_REVIEW_THRESHOLD = 0.78;
 
 const allowedTypes = new Set<ExerciseType>([
   "fill_in_the_blanks",
@@ -53,12 +53,29 @@ function normalizeAnalysis(value: unknown): ExerciseAnalysis {
   };
 }
 
+function structureLooksConsistent(analysis: ExerciseAnalysis) {
+  if (analysis.questionCount >= 3 && analysis.questions.length / analysis.questionCount < 0.75) return false;
+
+  if (analysis.exerciseType === "multiple_choice") {
+    const questionsWithOptions = analysis.questions.filter((question) => question.optionCount >= 2).length;
+    if (questionsWithOptions < Math.max(1, Math.ceil(analysis.questions.length * 0.5))) return false;
+  }
+
+  if (analysis.exerciseType === "fill_in_the_blanks") {
+    const questionsWithBlanks = analysis.questions.filter((question) => question.blankCount > 0).length;
+    if (analysis.questions.length >= 3 && questionsWithBlanks < Math.ceil(analysis.questions.length * 0.5)) return false;
+  }
+
+  return true;
+}
+
 export function needsChatGPTReview(analysis: ExerciseAnalysis, ocrText: string) {
   return (
     analysis.confidence < CHATGPT_REVIEW_THRESHOLD ||
     analysis.exerciseType === "custom" ||
     ocrText.trim().length < 80 ||
-    (analysis.questions.length === 0 && analysis.questionCount === 8)
+    (analysis.questions.length === 0 && analysis.questionCount === 8) ||
+    !structureLooksConsistent(analysis)
   );
 }
 
