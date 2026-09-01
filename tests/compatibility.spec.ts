@@ -29,6 +29,24 @@ test("typed-text decoding works without any browser-specific API", async ({ page
   await expect(page.getByRole("heading", { name: "זה המבנה שמצאנו" })).toBeVisible();
 });
 
+test("word-list instructions do not turn a blank exercise into multiple choice", async ({ page }) => {
+  await page.goto("/");
+  await page.getByPlaceholder("הדבק כאן טקסט של תרגיל...").fill(
+    "Fill in the blanks. Choose the correct word from the list provided.\n1. We ____ home early.\n2. She ____ the door.\n3. They ____ the game.\nword list: leave, close, win"
+  );
+  await page.getByRole("button", { name: "פענח טקסט מקומית" }).click();
+  await expect(page.getByLabel("סוג התרגיל")).toHaveValue("fill_in_the_blanks");
+});
+
+test("multiple choice requires real option evidence", async ({ page }) => {
+  await page.goto("/");
+  await page.getByPlaceholder("הדבק כאן טקסט של תרגיל...").fill(
+    "Multiple choice. Choose the correct answer.\n1. Which word fits?\nA. run\nB. runs\nC. running\n2. Pick the best form.\nA. go\nB. goes\nC. going"
+  );
+  await page.getByRole("button", { name: "פענח טקסט מקומית" }).click();
+  await expect(page.getByLabel("סוג התרגיל")).toHaveValue("multiple_choice");
+});
+
 test("image-file intake reaches preview using standard File APIs", async ({ page }) => {
   await page.goto("/");
   const imageInput = page.locator('input[type="file"][accept*="image/jpeg"]');
