@@ -2,6 +2,7 @@
 
 import { ChangeEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { RefObject } from "react";
+import { GestureViewport } from "@/components/GestureViewport";
 import { analyzeLocally } from "@/lib/local-analyzer";
 import {
   clearActiveAnalysisJob,
@@ -89,6 +90,7 @@ const initialAnalysis: ExerciseAnalysis = {
   questionCount: 8,
   answerFormat: "open",
   hasWordBank: false,
+  wordBankWords: [],
   confidence: 0.5,
   layoutNotes: [],
   questions: []
@@ -196,6 +198,7 @@ function StructuralQuestion({ analysis, index }: { analysis: ExerciseAnalysis; i
 
 function QuestionSkeleton({ analysis }: { analysis: ExerciseAnalysis }) {
   const count = Math.min(Math.max(analysis.questionCount, analysis.questions.length), 30);
+  const bankWords = (analysis.wordBankWords || []).filter(Boolean);
 
   return (
     <div className="worksheet-paper">
@@ -205,7 +208,11 @@ function QuestionSkeleton({ analysis }: { analysis: ExerciseAnalysis }) {
       {analysis.hasWordBank && (
         <div className="word-bank-structural">
           <strong>WORD BANK</strong>
-          <div>{Array.from({ length: 6 }).map((_, i) => <span key={i}>word</span>)}</div>
+          {bankWords.length > 0 ? (
+            <div>{bankWords.map((word, index) => <span key={`${word}-${index}`}>{word}</span>)}</div>
+          ) : (
+            <div className="word-bank-unread">Word bank detected — terms were not read reliably.</div>
+          )}
         </div>
       )}
       <div className="paper-questions">
@@ -306,6 +313,7 @@ export function TeacherSheetFlow() {
   const [handoffActive, setHandoffActive] = useState(false);
   const [handoffStatus, setHandoffStatus] = useState("");
   const [returnText, setReturnText] = useState("");
+  const [comparisonIndex, setComparisonIndex] = useState<0 | 1>(0);
   const cameraRef = useRef<HTMLInputElement>(null);
   const imageRef = useRef<HTMLInputElement>(null);
   const pdfRef = useRef<HTMLInputElement>(null);
@@ -319,15 +327,15 @@ export function TeacherSheetFlow() {
 
   useEffect(() => {
     if (step !== "analyzing" || !analysisStartedAt) return;
-    const update = () => setAnalysisTick(Date.now());
-    update();
-    const interval = window.setInterval(update, 1000);
-    document.addEventListener("visibilitychange", update);
-    window.addEventListener("pageshow", update);
+    const updateTick = () => setAnalysisTick(Date.now());
+    updateTick();
+    const interval = window.setInterval(updateTick, 1000);
+    document.addEventListener("visibilitychange", updateTick);
+    window.addEventListener("pageshow", updateTick);
     return () => {
       window.clearInterval(interval);
-      document.removeEventListener("visibilitychange", update);
-      window.removeEventListener("pageshow", update);
+      document.removeEventListener("visibilitychange", updateTick);
+      window.removeEventListener("pageshow", updateTick);
     };
   }, [step, analysisStartedAt]);
 
@@ -355,6 +363,7 @@ export function TeacherSheetFlow() {
             setOcrText(saved.ocrText || "");
             setEngine(saved.engine || "local");
             if (saved.sourceKind && sourceKinds.has(saved.sourceKind as SourceKind)) setSourceKind(saved.sourceKind as SourceKind);
+            setComparisonIndex(0);
             setStep("decoded");
             return;
           }
@@ -404,6 +413,7 @@ export function TeacherSheetFlow() {
       setError("");
       setAnalysisMetrics(null);
       setAnalysisWallMs(0);
+      setComparisonIndex(0);
       void clearActiveAnalysisJob();
       setStep("preview");
     };
@@ -490,6 +500,7 @@ export function TeacherSheetFlow() {
       setWarning(result.warning || "");
       setAnalysisMetrics(result.metrics || null);
       setAnalysisWallMs(Math.max(0, completedAt - startedAt));
+      setComparisonIndex(0);
       await clearActiveAnalysisJob();
       setStep("decoded");
     } catch (e) {
@@ -573,6 +584,7 @@ export function TeacherSheetFlow() {
       setHandoffPrompt("");
       setReturnText("");
       setHandoffId("");
+      setComparisonIndex(0);
       localStorage.removeItem(HANDOFF_STORAGE_KEY);
       void clearActiveAnalysisJob();
     } catch (e) {
@@ -609,11 +621,12 @@ export function TeacherSheetFlow() {
     setHandoffActive(false);
     setHandoffStatus("");
     setReturnText("");
+    setComparisonIndex(0);
     localStorage.removeItem(HANDOFF_STORAGE_KEY);
     void clearActiveAnalysisJob();
   }
 
-  const update = <K extends keyof ExerciseAnalysis>(key: K, value: ExerciseAnalysis[K]) => setAnalysis((a) => ({ ...a, [key]: value }));
+  const update = <K extends keyof ExerciseAnalysis>(key: K, value: ExerciseAnalysis[K]) => setAnalysis((current) => ({ ...current, [key]: value }));
   const selectedMeta = sourceKind && sourceKind !== "text" ? sourceMeta[sourceKind] : null;
   const visibleQuestionCount = Math.min(Math.max(analysis.questionCount, analysis.questions.length), 30);
 
@@ -649,7 +662,7 @@ export function TeacherSheetFlow() {
           <input ref={wordRef} hidden type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={handleFile("word")} />
           <div className="format-support-row"><span>Camera</span><span>JPG</span><span>PNG</span><span>WEBP</span><span>TIFF</span><span>PDF</span><span>DOCX</span></div>
           <div className="or"><span>או הדבק טקסט לצורכי בדיקת הפענוח</span></div>
-          <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="הדבק כאן טקסט של תרגיל..." />
+          <textarea value={text} onChange={(event) => setText(event.target.value)} placeholder="הדבק כאן טקסט של תרגיל..." />
           {error && <div className="error-box">{error}</div>}
           <button className="primary" disabled={!text.trim()} onClick={analyzeText}>פענח טקסט מקומית</button>
         </section>
@@ -706,7 +719,7 @@ export function TeacherSheetFlow() {
                   <div className="bridge-steps"><span className="done">1. בקשה הוכנה</span><span className="done">2. ChatGPT</span><span className="active">3. החזרה ל-TeacherSheet</span></div>
                   {handoffStatus && <div className="handoff-status">{handoffStatus}</div>}
                   <div className="bridge-actions"><button className="bridge-primary" type="button" onClick={() => void importFromClipboard()}>הדבק תוצאה מ-ChatGPT</button><button className="secondary" type="button" onClick={() => void openChatGPTReview()}>פתח שוב את ChatGPT</button></div>
-                  <details className="bridge-manual"><summary>אם ההדבקה האוטומטית לא עובדת</summary><p>העתק ב-ChatGPT את כל בלוק התשובה, הדבק כאן ולחץ ייבוא.</p><textarea className="return-textarea" value={returnText} onChange={(e) => setReturnText(e.target.value)} placeholder="הדבק כאן את תשובת ChatGPT..." /><button className="secondary" type="button" disabled={!returnText.trim()} onClick={() => importChatGPTText(returnText)}>ייבא תשובה שהודבקה</button></details>
+                  <details className="bridge-manual"><summary>אם ההדבקה האוטומטית לא עובדת</summary><p>העתק ב-ChatGPT את כל בלוק התשובה, הדבק כאן ולחץ ייבוא.</p><textarea className="return-textarea" value={returnText} onChange={(event) => setReturnText(event.target.value)} placeholder="הדבק כאן את תשובת ChatGPT..." /><button className="secondary" type="button" disabled={!returnText.trim()} onClick={() => importChatGPTText(returnText)}>ייבא תשובה שהודבקה</button></details>
                   <details className="bridge-manual"><summary>הצג את הבקשה שנשלחת ל-ChatGPT</summary><pre className="handoff-prompt">{handoffPrompt}</pre></details>
                 </>
               )}
@@ -718,20 +731,45 @@ export function TeacherSheetFlow() {
           <div className="decoded-grid decoded-grid-v2">
             <div className="form-panel edit-panel">
               <div className="panel-heading"><strong>עריכת הפענוח</strong><small>כל שינוי מתעדכן מיד בתצוגת המבנה.</small></div>
-              <label>סוג התרגיל<select value={analysis.exerciseType} onChange={(e) => update("exerciseType", e.target.value as ExerciseType)}>{Object.entries(typeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-              <label>כותרת<input value={analysis.title} onChange={(e) => update("title", e.target.value)} /></label>
-              <label>הוראות<textarea value={analysis.instructions} onChange={(e) => update("instructions", e.target.value)} /></label>
-              <div className="two-cols"><label>מספר שאלות<input type="number" min="1" max="30" value={analysis.questionCount} onChange={(e) => update("questionCount", Math.max(1, Math.min(30, Number(e.target.value))))} /></label><label>פורמט תשובה<select value={analysis.answerFormat} onChange={(e) => update("answerFormat", e.target.value as ExerciseAnalysis["answerFormat"])}><option value="blank">Blank</option><option value="choice">Choice</option><option value="matching">Matching</option><option value="true_false">True / False</option><option value="open">Open</option></select></label></div>
-              <label className="toggle-row"><input type="checkbox" checked={analysis.hasWordBank} onChange={(e) => update("hasWordBank", e.target.checked)} /><span>קיים Word Bank במבנה המקורי</span></label>
+              <label>סוג התרגיל<select value={analysis.exerciseType} onChange={(event) => update("exerciseType", event.target.value as ExerciseType)}>{Object.entries(typeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+              <label>כותרת<input value={analysis.title} onChange={(event) => update("title", event.target.value)} /></label>
+              <label>הוראות<textarea value={analysis.instructions} onChange={(event) => update("instructions", event.target.value)} /></label>
+              <div className="two-cols"><label>מספר שאלות<input type="number" min="1" max="30" value={analysis.questionCount} onChange={(event) => update("questionCount", Math.max(1, Math.min(30, Number(event.target.value))))} /></label><label>פורמט תשובה<select value={analysis.answerFormat} onChange={(event) => update("answerFormat", event.target.value as ExerciseAnalysis["answerFormat"])}><option value="blank">Blank</option><option value="choice">Choice</option><option value="matching">Matching</option><option value="true_false">True / False</option><option value="open">Open</option></select></label></div>
+              <label className="toggle-row"><input type="checkbox" checked={analysis.hasWordBank} onChange={(event) => update("hasWordBank", event.target.checked)} /><span>קיים Word Bank במבנה המקורי</span></label>
+              {analysis.hasWordBank && <div className="recognized-bank-note">זוהו במחסן: <b>{analysis.wordBankWords?.length || 0}</b> פריטים. אם התוכן לא נקרא בביטחון, TeacherSheet לא ממציא מילים ומציע ChatGPT.</div>}
               <details><summary>הטקסט שנקרא מהדף</summary><pre>{ocrText}</pre></details>
             </div>
 
             <section className="comparison-panel" aria-label="השוואה למקור">
               <div className="comparison-header"><div><strong>השוואה למקור</strong><small>בדוק שהמבנה שומר על מספר הפריטים, סוג התרגיל והפריסה.</small></div><span>מקור ↔ מבנה</span></div>
-              <div className="comparison-mobile-hint">בטלפון: החלק ימינה/שמאלה כדי לעבור בין המקור למבנה. כל צד מוצג ב-Fit-to-page.</div>
+              <div className="comparison-mobile-hint">בטלפון: החלק אופקית כדי להחליף צד. בצביטה הזום מתבצע סביב נקודת האצבעות; מעל 100% גרירה מזיזה את הדף.</div>
+              <div className="comparison-switch" role="tablist" aria-label="צד להשוואה">
+                <button type="button" role="tab" aria-selected={comparisonIndex === 0} className={comparisonIndex === 0 ? "active" : ""} onClick={() => setComparisonIndex(0)}>מקור</button>
+                <button type="button" role="tab" aria-selected={comparisonIndex === 1} className={comparisonIndex === 1 ? "active" : ""} onClick={() => setComparisonIndex(1)}>מבנה שזוהה</button>
+              </div>
               <div className="comparison-track">
-                <article className="comparison-pane comparison-source-pane"><div className="comparison-pane-title"><b>1. מקור</b><small>{sourceKind || "text"}</small></div><SourceComparison file={file} previewUrl={previewUrl} ocrText={ocrText} /></article>
-                <article className="comparison-pane comparison-structure-pane"><div className="comparison-pane-title"><b>2. מבנה שזוהה</b><small>כל {visibleQuestionCount} הפריטים · Fit-to-page</small></div><FittedWorksheetPreview analysis={analysis} /></article>
+                <article className={`comparison-pane comparison-source-pane${comparisonIndex === 0 ? " is-mobile-active" : ""}`}>
+                  <div className="comparison-pane-title"><b>1. מקור</b><small>{sourceKind || "text"}</small></div>
+                  <GestureViewport
+                    label="דף המקור"
+                    className="comparison-gesture"
+                    onSwipePrevious={() => setComparisonIndex(1)}
+                    onSwipeNext={() => setComparisonIndex(1)}
+                  >
+                    <SourceComparison file={file} previewUrl={previewUrl} ocrText={ocrText} />
+                  </GestureViewport>
+                </article>
+                <article className={`comparison-pane comparison-structure-pane${comparisonIndex === 1 ? " is-mobile-active" : ""}`}>
+                  <div className="comparison-pane-title"><b>2. מבנה שזוהה</b><small>כל {visibleQuestionCount} הפריטים · Fit-to-page</small></div>
+                  <GestureViewport
+                    label="המבנה שזוהה"
+                    className="comparison-gesture"
+                    onSwipePrevious={() => setComparisonIndex(0)}
+                    onSwipeNext={() => setComparisonIndex(0)}
+                  >
+                    <FittedWorksheetPreview analysis={analysis} />
+                  </GestureViewport>
+                </article>
               </div>
             </section>
           </div>
@@ -743,7 +781,7 @@ export function TeacherSheetFlow() {
       {step === "draft" && (
         <section className="screen-card draft-screen">
           <div className="screen-heading"><div><div className="eyebrow">STRUCTURAL DRAFT</div><h1>טיוטת דף התרגול</h1></div><span className="status-dot">כל השורות שזוהו</span></div>
-          <div className="scope-warning"><b>גבול גרסה זו:</b> זהו דף מבני בלבד. עדיין אין כאן הכנסת אוצר מילים, בדיקות איכות, Answer Key או הפקת הדף הסופי.</div>
+          <div className="scope-warning"><b>גבול גרסה זו:</b> זהו דף מבני בלבד. עדיין אין כאן הכנסת אוצר מילים חדש, בדיקות איכות, Answer Key או הפקת הדף הסופי.</div>
           <QuestionSkeleton analysis={analysis} />
           <div className="action-row"><button className="secondary" onClick={() => setStep("decoded")}>ערוך והשווה למקור</button><button className="primary" onClick={reset}>נתח דוגמה נוספת</button></div>
         </section>
