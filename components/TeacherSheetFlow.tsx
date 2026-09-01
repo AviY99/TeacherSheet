@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { RefObject } from "react";
 import { analyzeLocally } from "@/lib/local-analyzer";
 import {
@@ -212,6 +212,59 @@ function QuestionSkeleton({ analysis }: { analysis: ExerciseAnalysis }) {
         {Array.from({ length: count }).map((_, index) => (
           <StructuralQuestion key={index} analysis={analysis} index={index} />
         ))}
+      </div>
+    </div>
+  );
+}
+
+function FittedWorksheetPreview({ analysis }: { analysis: ExerciseAnalysis }) {
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [fit, setFit] = useState({ scale: 1, height: 0 });
+
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    const content = contentRef.current;
+    const paper = content?.querySelector<HTMLElement>(".worksheet-paper");
+    if (!viewport || !content || !paper) return;
+
+    let frame = 0;
+    const recalculate = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const availableWidth = Math.max(1, viewport.clientWidth - 16);
+        const availableHeight = Math.max(1, viewport.clientHeight - 16);
+        const paperWidth = Math.max(1, paper.scrollWidth || paper.offsetWidth);
+        const paperHeight = Math.max(1, paper.scrollHeight || paper.offsetHeight);
+        const scale = Math.min(1, availableWidth / paperWidth, availableHeight / paperHeight);
+        setFit({ scale, height: Math.ceil(paperHeight * scale) });
+      });
+    };
+
+    recalculate();
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(recalculate);
+      observer.observe(viewport);
+      observer.observe(paper);
+      return () => {
+        cancelAnimationFrame(frame);
+        observer.disconnect();
+      };
+    }
+
+    window.addEventListener("resize", recalculate);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("resize", recalculate);
+    };
+  }, [analysis]);
+
+  return (
+    <div className="worksheet-fit-viewport" ref={viewportRef}>
+      <div className="worksheet-fit-stage" style={{ height: fit.height ? `${fit.height}px` : undefined }}>
+        <div className="worksheet-fit-content" ref={contentRef} style={{ transform: `scale(${fit.scale})` }}>
+          <QuestionSkeleton analysis={analysis} />
+        </div>
       </div>
     </div>
   );
@@ -562,7 +615,7 @@ export function TeacherSheetFlow() {
 
   const update = <K extends keyof ExerciseAnalysis>(key: K, value: ExerciseAnalysis[K]) => setAnalysis((a) => ({ ...a, [key]: value }));
   const selectedMeta = sourceKind && sourceKind !== "text" ? sourceMeta[sourceKind] : null;
-  const compactPreview = { ...analysis, questionCount: Math.min(analysis.questionCount, 5), questions: analysis.questions.slice(0, 5) };
+  const visibleQuestionCount = Math.min(Math.max(analysis.questionCount, analysis.questions.length), 30);
 
   return (
     <main className="app-shell">
@@ -675,10 +728,10 @@ export function TeacherSheetFlow() {
 
             <section className="comparison-panel" aria-label="השוואה למקור">
               <div className="comparison-header"><div><strong>השוואה למקור</strong><small>בדוק שהמבנה שומר על מספר הפריטים, סוג התרגיל והפריסה.</small></div><span>מקור ↔ מבנה</span></div>
-              <div className="comparison-mobile-hint">בטלפון: החלק ימינה/שמאלה כדי לעבור בין המקור למבנה.</div>
+              <div className="comparison-mobile-hint">בטלפון: החלק ימינה/שמאלה כדי לעבור בין המקור למבנה. כל צד מוצג ב-Fit-to-page.</div>
               <div className="comparison-track">
                 <article className="comparison-pane comparison-source-pane"><div className="comparison-pane-title"><b>1. מקור</b><small>{sourceKind || "text"}</small></div><SourceComparison file={file} previewUrl={previewUrl} ocrText={ocrText} /></article>
-                <article className="comparison-pane comparison-structure-pane"><div className="comparison-pane-title"><b>2. מבנה שזוהה</b><small>תצוגה של 5 פריטים ראשונים</small></div><QuestionSkeleton analysis={compactPreview} /></article>
+                <article className="comparison-pane comparison-structure-pane"><div className="comparison-pane-title"><b>2. מבנה שזוהה</b><small>כל {visibleQuestionCount} הפריטים · Fit-to-page</small></div><FittedWorksheetPreview analysis={analysis} /></article>
               </div>
             </section>
           </div>
